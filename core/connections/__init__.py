@@ -7,6 +7,7 @@ from .postgresql import PostgreSQLConfig
 from .mysql import MySQLConfig
 from .mongodb import MongoDBConfig
 from .sqlite import SQLiteConfig
+from .sqlserver import SQLServerConfig
 from .factory import (
     create_connection_config,
     load_config_from_dict,
@@ -19,6 +20,7 @@ __all__ = [
     "MySQLConfig", 
     "MongoDBConfig",
     "SQLiteConfig",
+    "SQLServerConfig",
     "create_connection_config",
     "load_config_from_dict",
     "load_config_from_url"
