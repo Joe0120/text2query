@@ -43,17 +43,22 @@ class MongoDBAdapter(BaseQueryComposer):
         limit: Optional[int] = 1000,
     ) -> Dict[str, Any]:
         """
-        Execute MongoDB command asynchronously and return a structured response.
-        
+        超級安全的 MongoDB 命令執行器
+        - 永遠不會 crash
+        - 支援多種格式的命令
+        - 自動轉換類型
+        - 失敗時自動診斷
+
         Args:
-            command: MongoDB command (string or dict format)
+            command: MongoDB 命令（字串或字典格式）
             params: Not used for MongoDB (kept for interface compatibility)
             safe: Whether to apply safety checks
             limit: Maximum number of results to return
-            
+
         Returns:
-            Structured response dictionary
+            統一格式的結果字典
         """
+        
         start_time = time.time()
         
         try:
@@ -72,30 +77,31 @@ class MongoDBAdapter(BaseQueryComposer):
                     'ori_sql_command': str(command)
                 }
             
-            # 2. 應用安全檢查
-            if safe and not self._is_query_safe(parsed["data"]):
-                return {
-                    'success': False,
-                    'columns': ['error'],
-                    'result': [['Query contains forbidden operations']],
-                    'sql_command': str(command)[:100],
-                    'ori_sql_command': str(command)
-                }
+            # 2. 執行已解析的命令
+            result = await self._safe_execute_parsed(parsed["data"], str(command))
             
-            # 3. 執行已解析的命令
-            result = await self._safe_execute_parsed(parsed["data"], str(command), limit)
+            # 3. 如果執行失敗且是 aggregate 命令，進行詳細診斷
+            if not result['success'] and parsed["data"].get('operation') == 'aggregate':
+                self.logger.info("執行失敗，開始詳細診斷...")
+                diagnostic_result = await self._diagnose_aggregate_failure(command, parsed["data"])
+                
+                # 如果診斷成功執行了查詢，返回診斷結果
+                if diagnostic_result.get('success'):
+                    execution_time = (time.time() - start_time) * 1000
+                    diagnostic_result['execution_time'] = execution_time
+                    return diagnostic_result
+                else:
+                    # 將診斷信息添加到錯誤結果中
+                    result['diagnostic_info'] = diagnostic_result.get('diagnostic_info', '')
             
             execution_time = (time.time() - start_time) * 1000
             result['execution_time'] = execution_time
-            result['metadata'] = result.get('metadata', {})
-            result['metadata']['execution_time_ms'] = execution_time
-            
-            self.logger.info(f"MongoDB command executed {'successfully' if result['success'] else 'with errors'}, time: {execution_time:.2f}ms")
+            self.logger.info(f"命令執行{'成功' if result['success'] else '失敗'}，耗時: {execution_time:.2f}ms")
             
             return result
             
         except Exception as e:
-            self.logger.error(f"MongoDB sql_execution error: {e}")
+            self.logger.error(f"sql_execution 錯誤: {e}")
             self.logger.error(traceback.format_exc())
             
             execution_time = (time.time() - start_time) * 1000
@@ -106,8 +112,7 @@ class MongoDBAdapter(BaseQueryComposer):
                 'result': [[str(e), traceback.format_exc()]],
                 'sql_command': str(command)[:100],
                 'ori_sql_command': str(command),
-                'execution_time': execution_time,
-                'metadata': {'execution_time_ms': execution_time}
+                'execution_time': execution_time
             }
 
     async def get_sql_struct_str(self) -> str:
@@ -272,7 +277,158 @@ class MongoDBAdapter(BaseQueryComposer):
         return connection_info
 
     # ============================================================================
-    # 4. 命令解析和安全檢查
+    # 4. 診斷方法
+    # ============================================================================
+
+    async def _diagnose_aggregate_failure(self, original_command: str, parsed_data: Dict) -> Dict[str, Any]:
+        """
+        診斷聚合命令執行失敗的原因
+
+        Args:
+            original_command: 原始命令字串
+            parsed_data: 解析後的命令數據
+
+        Returns:
+            診斷結果的字典格式
+        """
+        
+        diagnostic_info = []
+        diagnostic_info.append(f"診斷聚合命令失敗原因")
+        diagnostic_info.append(f"原始命令: {original_command[:200]}...")
+        
+        try:
+            collection_name = parsed_data.get('collection')
+            pipeline = parsed_data.get('pipeline', [])
+            
+            diagnostic_info.append(f"集合: {collection_name}")
+            diagnostic_info.append(f"Pipeline 階段數: {len(pipeline)}")
+            
+            # 檢查集合是否存在
+            if collection_name:
+                existing_collections = await self._db.list_collection_names()
+                if collection_name not in existing_collections:
+                    diagnostic_info.append(f"✗ 集合 {collection_name} 不存在")
+                    return {
+                        'success': False,
+                        'columns': ['error'],
+                        'result': [[f'集合 {collection_name} 不存在']],
+                        'sql_command': str(parsed_data),
+                        'ori_sql_command': original_command,
+                        'diagnostic_info': '\n'.join(diagnostic_info)
+                    }
+                else:
+                    diagnostic_info.append(f"✓ 集合存在")
+            
+            # 嘗試直接執行 pipeline
+            try:
+                collection = self._db[collection_name]
+                
+                # 逐步測試 pipeline
+                for i, stage in enumerate(pipeline):
+                    test_pipeline = pipeline[:i+1]
+                    diagnostic_info.append(f"\n測試前 {i+1} 個階段:")
+                    diagnostic_info.append(f"  {json.dumps(stage, default=str)[:100]}")
+                    
+                    try:
+                        cursor = collection.aggregate(test_pipeline)
+                        test_results = await cursor.to_list(length=1)
+                        diagnostic_info.append(f"  ✓ 階段 {i+1} 執行成功")
+                        
+                        if i == len(pipeline) - 1:  # 最後一個階段
+                            # 如果所有階段都成功，執行完整查詢
+                            cursor = collection.aggregate(pipeline)
+                            results = await cursor.to_list(length=None)
+                            
+                            if results:
+                                # 收集欄位
+                                all_fields = set()
+                                for doc in results:
+                                    if doc is not None:
+                                        all_fields.update(doc.keys())
+                                
+                                columns = sorted(list(all_fields))
+                                
+                                # 轉換為表格
+                                table_data = []
+                                for doc in results:
+                                    if doc is not None:
+                                        row = []
+                                        for col in columns:
+                                            value = doc.get(col)
+                                            row.append(self._serialize_value(value))
+                                        table_data.append(row)
+                                
+                                diagnostic_info.append(f"\n✓ 診斷成功，查詢返回 {len(results)} 筆結果")
+                                
+                                return {
+                                    'success': True,
+                                    'columns': columns,
+                                    'result': table_data,
+                                    'sql_command': f"db.{collection_name}.aggregate({json.dumps(pipeline, default=str)})",
+                                    'ori_sql_command': original_command,
+                                    'diagnostic_info': '\n'.join(diagnostic_info)
+                                }
+                            else:
+                                return {
+                                    'success': True,
+                                    'columns': [],
+                                    'result': [],
+                                    'sql_command': f"db.{collection_name}.aggregate({json.dumps(pipeline, default=str)})",
+                                    'ori_sql_command': original_command,
+                                    'diagnostic_info': '\n'.join(diagnostic_info)
+                                }
+                                
+                    except Exception as stage_error:
+                        diagnostic_info.append(f"  ✗ 階段 {i+1} 失敗: {str(stage_error)[:100]}")
+                        
+                        # 嘗試修復常見問題
+                        if '$year' in str(stage) or '$month' in str(stage):
+                            diagnostic_info.append(f"  檢測到日期操作，檢查 StartTime 欄位...")
+                            
+                            # 檢查 StartTime 欄位的類型
+                            sample = await collection.find_one({'StartTime': {'$exists': True}})
+                            if sample:
+                                start_time_value = sample.get('StartTime')
+                                diagnostic_info.append(f"  StartTime 類型: {type(start_time_value)}")
+                                if not isinstance(start_time_value, datetime):
+                                    diagnostic_info.append(f"  ✗ StartTime 不是日期類型，無法使用日期操作符")
+                        
+                        # 返回錯誤
+                        return {
+                            'success': False,
+                            'columns': ['error', 'failed_stage', 'stage_index'],
+                            'result': [[str(stage_error), json.dumps(stage, default=str), i+1]],
+                            'sql_command': f"db.{collection_name}.aggregate({json.dumps(pipeline, default=str)})",
+                            'ori_sql_command': original_command,
+                            'diagnostic_info': '\n'.join(diagnostic_info)
+                        }
+                
+            except Exception as exec_error:
+                diagnostic_info.append(f"\n執行錯誤: {str(exec_error)}")
+                
+                return {
+                    'success': False,
+                    'columns': ['error'],
+                    'result': [[str(exec_error)]],
+                    'sql_command': str(parsed_data),
+                    'ori_sql_command': original_command,
+                    'diagnostic_info': '\n'.join(diagnostic_info)
+                }
+                
+        except Exception as diag_error:
+            diagnostic_info.append(f"\n診斷過程錯誤: {str(diag_error)}")
+            
+            return {
+                'success': False,
+                'columns': ['error'],
+                'result': [[f'診斷失敗: {str(diag_error)}']],
+                'sql_command': str(parsed_data),
+                'ori_sql_command': original_command,
+                'diagnostic_info': '\n'.join(diagnostic_info)
+            }
+
+    # ============================================================================
+    # 5. 命令解析和安全檢查
     # ============================================================================
 
     def _safe_parse_command(self, command: Union[str, Dict]) -> Dict[str, Any]:
@@ -477,8 +633,9 @@ class MongoDBAdapter(BaseQueryComposer):
     # 5. 命令執行方法
     # ============================================================================
 
-    async def _safe_execute_parsed(self, command: Dict, ori_command: str, limit: int) -> Dict:
-        """執行已解析的命令"""
+    async def _safe_execute_parsed(self, command: Dict, ori_command: str) -> Dict:
+        """執行已解析的命令 - 增強錯誤處理"""
+        
         try:
             operation = command.get('operation', '').lower()
             collection_name = command.get('collection')
@@ -487,7 +644,7 @@ class MongoDBAdapter(BaseQueryComposer):
                 return {
                     'success': False,
                     'columns': ['error'],
-                    'result': [['Collection name not specified']],
+                    'result': [['未指定集合名稱']],
                     'sql_command': str(command),
                     'ori_sql_command': ori_command
                 }
@@ -498,9 +655,9 @@ class MongoDBAdapter(BaseQueryComposer):
             if allowed_collections and collection_name not in allowed_collections:
                 existing_collections = await self._db.list_collection_names()
                 if collection_name not in existing_collections:
-                    error_msg = f'Collection "{collection_name}" does not exist'
+                    error_msg = f'集合 "{collection_name}" 不存在'
                 else:
-                    error_msg = f'Collection "{collection_name}" exists but not in allowed list'
+                    error_msg = f'集合 "{collection_name}" 存在但不在允許列表中'
                 
                 return {
                     'success': False,
@@ -510,29 +667,48 @@ class MongoDBAdapter(BaseQueryComposer):
                     'ori_sql_command': ori_command
                 }
             
+            # 檢查 collection 是否為 None
+            if self._db is None:
+                return {
+                    'success': False,
+                    'columns': ['error'],
+                    'result': [['資料庫連接未建立']],
+                    'sql_command': str(command),
+                    'ori_sql_command': ori_command
+                }
+            
             collection = self._db[collection_name]
+            
+            if collection is None:
+                return {
+                    'success': False,
+                    'columns': ['error'],
+                    'result': [[f'無法獲取集合: {collection_name}']],
+                    'sql_command': str(command),
+                    'ori_sql_command': ori_command
+                }
             
             # 根據操作類型執行
             if operation in ['find', 'findone', 'find_one']:
-                return await self._safe_execute_find(collection, command, ori_command, limit)
+                return await self._safe_execute_find(collection, command, ori_command)
             elif operation in ['countdocuments', 'count_documents', 'count']:
                 return await self._safe_execute_count(collection, command, ori_command)
             elif operation == 'aggregate':
-                return await self._safe_execute_aggregate(collection, command, ori_command, limit)
+                return await self._safe_execute_aggregate(collection, command, ori_command)
             elif operation == 'distinct':
                 return await self._safe_execute_distinct(collection, command, ori_command)
             else:
                 return {
                     'success': False,
                     'columns': ['error'],
-                    'result': [[f'Unsupported operation: {operation}']],
+                    'result': [[f'不支援的操作: {operation}']],
                     'sql_command': str(command),
                     'ori_sql_command': ori_command
                 }
                 
         except Exception as e:
             error_trace = traceback.format_exc()
-            self.logger.error(f"_safe_execute_parsed error: {e}")
+            self.logger.error(f"_safe_execute_parsed 錯誤: {e}")
             self.logger.error(error_trace)
             
             return {
@@ -543,8 +719,8 @@ class MongoDBAdapter(BaseQueryComposer):
                 'ori_sql_command': ori_command
             }
 
-    async def _safe_execute_find(self, collection, command: Dict, ori_command: str, limit: int) -> Dict:
-        """安全執行查找操作"""
+    async def _safe_execute_find(self, collection, command: Dict, ori_command: str) -> Dict:
+        """安全執行查找操作 - 支援 projection"""
         try:
             filter_doc = command.get('filter', command.get('params', {}))
             projection = command.get('projection')
@@ -554,10 +730,20 @@ class MongoDBAdapter(BaseQueryComposer):
             if projection:
                 projection = self._safe_convert_types(projection)
             
+            # 安全檢查
+            if not self._is_query_safe(filter_doc):
+                return {
+                    'success': False,
+                    'columns': ['error'],
+                    'result': [['查詢包含不允許的操作']],
+                    'sql_command': str(command),
+                    'ori_sql_command': ori_command
+                }
+            
             operation = command.get('operation', '').lower()
             options = command.get('options', {})
             
-            self.logger.info(f"Executing {operation}: filter={filter_doc}, projection={projection}")
+            self.logger.info(f"執行 {operation}: filter={filter_doc}, projection={projection}")
             
             if operation in ['findone', 'find_one']:
                 result = await collection.find_one(filter_doc, projection)
@@ -589,9 +775,9 @@ class MongoDBAdapter(BaseQueryComposer):
                 if 'skip' in options:
                     cursor = cursor.skip(options['skip'])
                 if 'limit' in options:
-                    cursor = cursor.limit(min(options['limit'], limit))
+                    cursor = cursor.limit(min(options['limit'], 10000))
                 else:
-                    cursor = cursor.limit(limit)
+                    cursor = cursor.limit(1000)
                 
                 results = await cursor.to_list(length=None)
                 
@@ -612,7 +798,6 @@ class MongoDBAdapter(BaseQueryComposer):
                     sql_command = f"db.{command['collection']}.find({json.dumps(filter_doc, default=str)}"
                     if projection:
                         sql_command += f", {json.dumps(projection, default=str)}"
-                    sql_command += ")"
                     
                     # 添加鏈式方法
                     if options:
@@ -631,11 +816,25 @@ class MongoDBAdapter(BaseQueryComposer):
                         'ori_sql_command': ori_command
                     }
                 else:
+                    # 構建包含鏈式方法的 sql_command（空結果情況）
+                    sql_command = f"db.{command['collection']}.find({json.dumps(filter_doc, default=str)}"
+                    if projection:
+                        sql_command += f", {json.dumps(projection, default=str)}"
+                    
+                    # 添加鏈式方法
+                    if options:
+                        if 'sort' in options:
+                            sql_command += f".sort({json.dumps(options['sort'], default=str)})"
+                        if 'skip' in options:
+                            sql_command += f".skip({options['skip']})"
+                        if 'limit' in options:
+                            sql_command += f".limit({options['limit']})"
+                    
                     return {
                         'success': True,
                         'columns': [],
                         'result': [],
-                        'sql_command': f"db.{command['collection']}.find({json.dumps(filter_doc, default=str)})",
+                        'sql_command': sql_command,
                         'ori_sql_command': ori_command
                     }
                     
@@ -653,6 +852,16 @@ class MongoDBAdapter(BaseQueryComposer):
         try:
             filter_doc = command.get('filter', command.get('params', {}))
             filter_doc = self._safe_convert_types(filter_doc)
+            
+            # 安全檢查
+            if not self._is_query_safe(filter_doc):
+                return {
+                    'success': False,
+                    'columns': ['error'],
+                    'result': [['查詢包含不允許的操作']],
+                    'sql_command': str(command),
+                    'ori_sql_command': ori_command
+                }
             
             count = await collection.count_documents(filter_doc)
             
@@ -673,8 +882,8 @@ class MongoDBAdapter(BaseQueryComposer):
                 'ori_sql_command': ori_command
             }
 
-    async def _safe_execute_aggregate(self, collection, command: Dict, ori_command: str, limit: int) -> Dict:
-        """安全執行聚合操作"""
+    async def _safe_execute_aggregate(self, collection, command: Dict, ori_command: str) -> Dict:
+        """安全執行聚合操作 - 支援自動攤平巢狀結果"""
         try:
             pipeline = command.get('pipeline', command.get('params', []))
             
@@ -684,20 +893,33 @@ class MongoDBAdapter(BaseQueryComposer):
             # 轉換特殊類型
             pipeline = self._safe_convert_types(pipeline)
             
-            # 添加安全限制
-            has_limit = any('$limit' in stage for stage in pipeline)
-            if not has_limit and len(pipeline) > 0:
-                has_group = any('$group' in stage for stage in pipeline)
-                if not has_group:
-                    pipeline.append({"$limit": limit})
+            # 安全檢查
+            if not self._is_query_safe(pipeline):
+                return {
+                    'success': False,
+                    'columns': ['error'],
+                    'result': [['查詢包含不允許的操作']],
+                    'sql_command': str(command),
+                    'ori_sql_command': ori_command
+                }
             
-            self.logger.info(f"Executing aggregate pipeline: {json.dumps(pipeline, default=str)[:500]}")
+            self.logger.info(f"執行聚合 pipeline: {json.dumps(pipeline, default=str)[:500]}")
             
             # 執行聚合
-            cursor = collection.aggregate(pipeline)
-            results = await cursor.to_list(length=None)
+            try:
+                cursor = collection.aggregate(pipeline)
+                results = await cursor.to_list(length=None)
+            except Exception as agg_error:
+                self.logger.error(f"聚合執行錯誤: {agg_error}")
+                return {
+                    'success': False,
+                    'columns': ['error'],
+                    'result': [[str(agg_error)]],
+                    'sql_command': f"db.{command['collection']}.aggregate({json.dumps(pipeline, default=str)})",
+                    'ori_sql_command': ori_command
+                }
             
-            self.logger.info(f"Aggregate returned {len(results)} results")
+            self.logger.info(f"聚合返回 {len(results)} 筆結果")
             
             if results:
                 # 攤平巢狀結構
@@ -771,12 +993,22 @@ class MongoDBAdapter(BaseQueryComposer):
                 return {
                     'success': False,
                     'columns': ['error'],
-                    'result': [['distinct operation requires field name']],
+                    'result': [['distinct 操作需要指定字段名']],
                     'sql_command': str(command),
                     'ori_sql_command': ori_command
                 }
             
             filter_doc = self._safe_convert_types(filter_doc)
+            
+            # 安全檢查
+            if not self._is_query_safe(filter_doc):
+                return {
+                    'success': False,
+                    'columns': ['error'],
+                    'result': [['查詢包含不允許的操作']],
+                    'sql_command': str(command),
+                    'ori_sql_command': ori_command
+                }
             
             distinct_values = await collection.distinct(field, filter_doc)
             
@@ -864,13 +1096,17 @@ class MongoDBAdapter(BaseQueryComposer):
     # ============================================================================
 
     def _parse_find_params(self, params_str: str) -> Dict:
-        """解析 find 方法的參數"""
+        """
+        解析 find 方法的參數（可能有 filter 和 projection 兩個參數）
+        修正版：正確處理參數邊界
+        """
         if not params_str:
             return {"filter": {}}
-        
+
         try:
-            # 嘗試直接解析整個字串作為 JSON 陣列
+            # 方法1：嘗試直接解析整個字串作為 JSON 陣列
             try:
+                # 如果整個參數是 [filter, projection] 格式
                 params_list = json.loads(f"[{params_str}]")
                 if len(params_list) >= 2:
                     return {
@@ -884,76 +1120,310 @@ class MongoDBAdapter(BaseQueryComposer):
                     }
             except:
                 pass
-            
-            # 簡化版本：只解析第一個參數作為 filter
-            filter_obj = self._safe_parse_params(params_str)
-            return {
-                "filter": filter_obj,
-                "projection": None
-            }
-                
+
+            # 方法2：使用括號匹配來分割參數
+            depth = 0
+            first_param_end = -1
+            in_string = False
+            escape_next = False
+
+            for i, char in enumerate(params_str):
+                if escape_next:
+                    escape_next = False
+                    continue
+
+                if char == '\\':
+                    escape_next = True
+                    continue
+
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+
+                if not in_string:
+                    if char in '{[(':
+                        depth += 1
+                    elif char in '}])':
+                        depth -= 1
+                        if depth == 0:
+                            # 找到第一個參數的結尾
+                            # 檢查後面是否還有參數
+                            remaining = params_str[i+1:].strip()
+                            if remaining and remaining[0] == ',':
+                                first_param_end = i + 1
+                                break
+
+            if first_param_end > 0:
+                # 有兩個參數
+                first_param = params_str[:first_param_end].strip()
+
+                # 找到第二個參數的結束位置
+                remaining = params_str[first_param_end:].strip()
+                if remaining.startswith(','):
+                    remaining = remaining[1:].strip()
+
+                # 找第二個參數的結束（可能後面還有 .sort() 等）
+                second_param_end = -1
+                depth = 0
+                in_string = False
+                escape_next = False
+
+                for i, char in enumerate(remaining):
+                    if escape_next:
+                        escape_next = False
+                        continue
+
+                    if char == '\\':
+                        escape_next = True
+                        continue
+
+                    if char == '"' and not escape_next:
+                        in_string = not in_string
+                        continue
+
+                    if not in_string:
+                        if char in '{[(':
+                            depth += 1
+                        elif char in '}])':
+                            depth -= 1
+                            if depth == 0:
+                                second_param_end = i + 1
+                                break
+
+                if second_param_end > 0:
+                    second_param = remaining[:second_param_end]
+                else:
+                    second_param = remaining
+
+                # 解析兩個參數
+                filter_obj = self._safe_parse_params(first_param)
+                projection_obj = self._safe_parse_params(second_param)
+
+                return {
+                    "filter": filter_obj,
+                    "projection": projection_obj
+                }
+            else:
+                # 只有一個參數（filter）
+                # 但要確保不包含後面的 .sort() 等
+                # 找到參數的真正結束位置
+                param_end = -1
+                depth = 0
+                in_string = False
+                escape_next = False
+
+                for i, char in enumerate(params_str):
+                    if escape_next:
+                        escape_next = False
+                        continue
+
+                    if char == '\\':
+                        escape_next = True
+                        continue
+
+                    if char == '"' and not escape_next:
+                        in_string = not in_string
+                        continue
+
+                    if not in_string:
+                        if char in '{[(':
+                            depth += 1
+                        elif char in '}])':
+                            depth -= 1
+                            if depth == 0:
+                                param_end = i + 1
+                                break
+
+                if param_end > 0 and param_end < len(params_str):
+                    # 有額外的內容（可能是錯誤的解析）
+                    actual_param = params_str[:param_end]
+                else:
+                    actual_param = params_str
+
+                filter_obj = self._safe_parse_params(actual_param)
+                return {
+                    "filter": filter_obj,
+                    "projection": None
+                }
+
         except Exception as e:
-            self.logger.error(f"Parse find params failed: {e}")
+            self.logger.error(f"解析 find 參數失敗: {e}")
+            self.logger.error(f"參數字串: {params_str[:200]}")
+            # 回退到簡單解析
             return {
                 "filter": self._safe_parse_params(params_str),
                 "projection": None
             }
 
     def _parse_aggregate_pipeline(self, pipeline_str: str) -> list:
-        """解析 aggregate pipeline"""
+        """專門解析 aggregate pipeline - 增強版"""
         try:
             # 先處理動態日期
             pipeline_str = self._handle_dynamic_dates(pipeline_str)
             
+            # 替換單引號為雙引號（針對字段引用）
+            
+            # 智能替換單引號
+            # 保護已經在雙引號內的內容
+            protected_content = {}
+            counter = 0
+            
+            def protect_double_quoted(match):
+                nonlocal counter
+                placeholder = f"__PROTECTED_{counter}__"
+                protected_content[placeholder] = match.group(0)
+                counter += 1
+                return placeholder
+            
+            # 先保護雙引號內容
+            pipeline_str = re.sub(r'"[^"]*"', protect_double_quoted, pipeline_str)
+            
+            # 現在可以安全地替換單引號為雙引號
+            pipeline_str = pipeline_str.replace("'", '"')
+            
+            # 恢復保護的內容
+            for placeholder, content in protected_content.items():
+                pipeline_str = pipeline_str.replace(placeholder, content)
+            
+            # 處理 MongoDB 語法
+            processed = self._preprocess_mongo_syntax_safe(pipeline_str)
+            
+            # 記錄處理過程
+            self.logger.debug(f"原始 pipeline: {pipeline_str[:200]}...")
+            self.logger.debug(f"處理後 pipeline: {processed[:200]}...")
+            
             # 嘗試解析
             try:
-                pipeline = json.loads(pipeline_str)
-            except json.JSONDecodeError:
-                # 返回一個基本的 pipeline
-                return [{"$limit": 1000}]
+                pipeline = json.loads(processed)
+            except json.JSONDecodeError as e:
+                self.logger.error(f"JSON 解析失敗: {e}")
+                self.logger.error(f"處理後的字串: {processed}")
+                
+                # 嘗試更激進的修復
+                # 確保所有需要引號的地方都有引號
+                processed = re.sub(r'(?<=[{,])\s*([a-zA-Z_$][a-zA-Z0-9_]*)\s*(?=:)', r'"\1"', processed)
+                
+                # 再次嘗試解析
+                try:
+                    pipeline = json.loads(processed)
+                except json.JSONDecodeError as e2:
+                    self.logger.error(f"第二次解析也失敗: {e2}")
+                    # 返回一個基本的 pipeline
+                    return [{"$limit": 10000}]  # 防止返回過多數據
             
             # 確保返回的是列表
             if not isinstance(pipeline, list):
                 pipeline = [pipeline]
             
-            # 添加安全限制
+            # 添加安全限制（如果沒有 $limit）
             has_limit = any('$limit' in stage for stage in pipeline)
             if not has_limit and len(pipeline) > 0:
+                # 檢查是否有潛在的大量數據操作
                 has_group = any('$group' in stage for stage in pipeline)
-                if not has_group:
-                    pipeline.append({"$limit": 1000})
+                if not has_group:  # 如果沒有 group，添加限制
+                    pipeline.append({"$limit": 10000})
             
             return pipeline
             
         except Exception as e:
-            self.logger.error(f"Parse aggregate pipeline failed: {e}")
-            return [{"$limit": 1000}]
+            self.logger.error(f"解析 aggregate pipeline 失敗: {e}")
+            self.logger.error(f"原始 pipeline: {pipeline_str}")
+            self.logger.error(traceback.format_exc())
+            # 返回一個安全的默認 pipeline
+            return [{"$limit": 10000}]
 
     def _safe_parse_params(self, params_str: str) -> Any:
-        """安全地解析參數字串"""
+        """安全地解析參數字串 - 增強版"""
         if not params_str:
             return {}
-        
+
         try:
             # 先處理特殊的日期語法
             params_str = self._handle_dynamic_dates(params_str)
-            
+
+            # 預處理 MongoDB 特殊語法
+            params_str = self._preprocess_mongo_syntax_safe(params_str)
+
             # 嘗試 JSON 解析
             return json.loads(params_str)
-            
-        except json.JSONDecodeError:
+
+        except json.JSONDecodeError as e:
+            self.logger.debug(f"JSON 解析失敗: {e}")
+            self.logger.debug(f"嘗試解析的字串: {params_str[:500]}")
+
             # 處理特殊情況
             if params_str.startswith('"') and params_str.endswith('"'):
                 return params_str[1:-1]
             elif params_str.startswith("'") and params_str.endswith("'"):
                 return params_str[1:-1]
-            
-            self.logger.warning(f"Cannot parse params: {params_str[:200]}")
+
+            # 嘗試修復常見問題
+            try:
+                # 修復 $currentDate 等特殊操作符
+                fixed_str = self._fix_special_operators(params_str)
+                return json.loads(fixed_str)
+            except:
+                pass
+
+            # 嘗試使用 ast.literal_eval
+            try:
+                import ast
+                # 替換 MongoDB 特殊語法
+                safe_str = params_str.replace('true', 'True').replace('false', 'False').replace('null', 'None')
+                # 移除 $ 符號暫時
+                safe_str = safe_str.replace('$', 'DOLLAR_')
+
+                result = ast.literal_eval(safe_str)
+                # 恢復 $ 符號
+                return self._restore_dollar_signs(result)
+            except:
+                pass
+
+            # 如果所有方法都失敗
+            self.logger.warning(f"無法解析參數: {params_str[:200]}")
             return {}
 
+    def _fix_special_operators(self, text: str) -> str:
+        """修復特殊的 MongoDB 操作符"""
+        # 處理 $currentDate
+        text = re.sub(r'\$currentDate\s*:\s*\{\s*\}', '"$$NOW"', text)
+        text = re.sub(r'\$currentDate\s*:\s*true', '"$$NOW"', text)
+
+        # 確保所有的操作符都有引號
+        operators = [
+            'currentDate', 'now', 'literal', 'type', 'exists',
+            'expr', 'eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'in', 'nin',
+            'and', 'or', 'not', 'nor', 'month', 'year', 'dayOfMonth',
+            'dateFromString', 'dateFromParts', 'dateToParts'
+        ]
+
+        for op in operators:
+            # 添加引號到操作符
+            text = re.sub(rf'(?<!["\'])\$({op})(?!["\'])', rf'"$\1"', text, flags=re.IGNORECASE)
+
+        # 修復嵌套的對象
+        text = re.sub(r'(?<=[{,])\s*(?!")([a-zA-Z_][a-zA-Z0-9_]*)(?!")\s*(?=:)', r'"\1"', text)
+
+        return text
+
+    def _restore_dollar_signs(self, obj: Any) -> Any:
+        """恢復 $ 符號（從 DOLLAR_ 轉換回來）"""
+        if isinstance(obj, dict):
+            return {
+                self._restore_dollar_signs(key): self._restore_dollar_signs(value)
+                for key, value in obj.items()
+            }
+        elif isinstance(obj, list):
+            return [self._restore_dollar_signs(item) for item in obj]
+        elif isinstance(obj, str):
+            return obj.replace('DOLLAR_', '$')
+        else:
+            return obj
+
     def _handle_dynamic_dates(self, text: str) -> str:
-        """處理動態日期計算"""
+        """處理動態日期計算 - 增強版"""
         current_year = datetime.now().year
+        current_month = datetime.now().month
         
         # 處理 $currentDate
         text = re.sub(r'\{\s*\$currentDate\s*:\s*\{\s*\}\s*\}', f'"{datetime.now().isoformat()}"', text)
@@ -965,13 +1435,133 @@ class MongoDBAdapter(BaseQueryComposer):
             text
         )
         
+        text = re.sub(
+            r'new\s+Date\s*\(\s*new\s+Date\s*\(\s*\)\s*\.\s*getFullYear\s*\(\s*\)\s*\+\s*1\s*,\s*0\s*,\s*1\s*\)',
+            f'ISODate("{current_year + 1}-01-01T00:00:00.000Z")',
+            text
+        )
+        
         # 處理 new Date() - 當前時間
         text = re.sub(r'new\s+Date\s*\(\s*\)', f'ISODate("{datetime.now().isoformat()}Z")', text)
+        
+        # 處理 $$NOW
+        text = text.replace('$$NOW', f'ISODate("{datetime.now().isoformat()}Z")')
+        
+        return text
+    
+    def _preprocess_mongo_syntax_safe(self, text: str) -> str:
+        """預處理 MongoDB 特殊語法 - 完整版"""
+        # 保護字段引用
+        field_refs = {}
+        field_counter = 0
+        
+        def protect_field_refs(match):
+            nonlocal field_counter
+            field_ref = match.group(1) if match.lastindex else match.group(0)
+            # 只保護真正的字段引用，不保護操作符
+            if not any(field_ref.startswith(f'${op}') for op in ['expr', 'eq', 'month', 'year', 'currentDate', 'dateFromString']):
+                placeholder = f"__FIELD_REF_{field_counter}__"
+                field_refs[placeholder] = field_ref
+                field_counter += 1
+                return f'"{placeholder}"'
+            return match.group(0)
+        
+        # 保護字段引用（改進的正則）
+        text = re.sub(r'"(\$[a-z][a-zA-Z0-9_.]*)"', protect_field_refs, text)
+        text = re.sub(r"'(\$[a-z][a-zA-Z0-9_.]*)'", protect_field_refs, text)
+        
+        # 修復：將單引號轉換為雙引號（針對字段名和字串值）
+        # 保護已經在雙引號內的內容
+        protected_content = {}
+        counter = 0
+        
+        def protect_double_quoted(match):
+            nonlocal counter
+            placeholder = f"__PROTECTED_{counter}__"
+            protected_content[placeholder] = match.group(0)
+            counter += 1
+            return placeholder
+        
+        # 先保護雙引號內容
+        text = re.sub(r'"[^"]*"', protect_double_quoted, text)
+        
+        # 現在可以安全地替換單引號為雙引號
+        text = text.replace("'", '"')
+        
+        # 恢復保護的內容
+        for placeholder, content in protected_content.items():
+            text = text.replace(placeholder, content)
+        
+        # 處理特殊類型 - 改進 ISODate 處理
+        text = re.sub(r'ObjectId\s*\(\s*["\']([^"\']+)["\']\s*\)', r'{"$oid": "\1"}', text)
+        
+        # 改進 ISODate 處理，支援單引號和雙引號，以及沒有引號的情況
+        text = re.sub(r'ISODate\s*\(\s*["\']([^"\']+)["\']\s*\)', r'{"$date": "\1"}', text)
+        text = re.sub(r'ISODate\s*\(\s*([^"\')\s]+)\s*\)', r'{"$date": "\1"}', text)
+        
+        text = re.sub(r'new\s+Date\s*\(\s*["\']([^"\']+)["\']\s*\)', r'{"$date": "\1"}', text)
+        
+        # 處理 $currentDate
+        text = re.sub(r'\{\s*\$currentDate\s*:\s*\{\s*\}\s*\}', '{"$date": "$$NOW"}', text)
+        text = re.sub(r'\$currentDate\s*:\s*\{\s*\}', '"$date": "$$NOW"', text)
+        
+        # MongoDB 操作符列表（完整）
+        all_operators = [
+            # 比較操作符
+            'eq', 'gt', 'gte', 'in', 'lt', 'lte', 'ne', 'nin',
+            # 邏輯操作符
+            'and', 'not', 'nor', 'or',
+            # 元素操作符
+            'exists', 'type',
+            # 評估操作符
+            'expr', 'jsonSchema', 'mod', 'regex', 'text', 'where',
+            # 日期操作符
+            'currentDate', 'dateFromString', 'dateFromParts', 'dateToParts', 
+            'dateToString', 'dayOfMonth', 'dayOfWeek', 'dayOfYear', 'hour',
+            'millisecond', 'minute', 'month', 'second', 'week', 'year',
+            # 聚合操作符
+            'addFields', 'bucket', 'bucketAuto', 'count', 'facet', 'group',
+            'limit', 'lookup', 'match', 'project', 'skip', 'sort', 'unwind',
+            # 數學操作符
+            'abs', 'add', 'ceil', 'divide', 'exp', 'floor', 'ln', 'log',
+            'log10', 'mod', 'multiply', 'pow', 'round', 'sqrt', 'subtract', 'trunc',
+            # 字串操作符
+            'concat', 'indexOfBytes', 'indexOfCP', 'ltrim', 'regexFind',
+            'regexFindAll', 'regexMatch', 'replaceOne', 'replaceAll', 'rtrim',
+            'split', 'strLenBytes', 'strLenCP', 'strcasecmp', 'substr',
+            'substrBytes', 'substrCP', 'toLower', 'toString', 'toUpper', 'trim',
+            # 陣列操作符
+            'arrayElemAt', 'arrayToObject', 'concatArrays', 'filter', 'first',
+            'in', 'indexOfArray', 'isArray', 'last', 'map', 'objectToArray',
+            'range', 'reduce', 'reverseArray', 'size', 'slice', 'zip',
+            # 其他
+            'avg', 'sum', 'min', 'max', 'push', 'addToSet', 'cond', 'ifNull',
+            'switch', 'let', 'literal'
+        ]
+        
+        # 為操作符添加引號（更精確的處理）
+        # 只處理在冒號前的操作符，避免處理字段引用
+        for op in all_operators:
+            # 只處理還沒有引號的操作符，且必須在冒號前
+            pattern = rf'(?<!["\'])\$({op})(?!["\'])\s*:'
+            replacement = r'"$\1":'
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        
+        # 處理字段引用（$開頭但不是操作符的）
+        # 修復：只在冒號後處理字段引用，避免錯誤處理
+        text = re.sub(r':\s*(?<!["\'])\$([a-zA-Z][a-zA-Z0-9_]*)(?!["\'])', r': "\$\1"', text)
+        
+        # 恢復字段引用
+        for placeholder, field_ref in field_refs.items():
+            text = text.replace(f'"{placeholder}"', f'"{field_ref}"')
+        
+        # 清理多餘的引號
+        text = re.sub(r'""([^"]+)""', r'"\1"', text)
         
         return text
 
     def _safe_convert_types(self, obj: Any) -> Any:
-        """安全地轉換特殊類型"""
+        """安全地轉換特殊類型 - 增強版"""
         if isinstance(obj, dict):
             converted = {}
             for key, value in obj.items():
@@ -981,10 +1571,20 @@ class MongoDBAdapter(BaseQueryComposer):
                         if value == 'now':
                             converted = datetime.now()
                         elif isinstance(value, str):
-                            try:
-                                converted = datetime.fromisoformat(value.replace('Z', '+00:00'))
-                            except:
-                                converted = value
+                            # 嘗試多種日期格式
+                            for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S.%fZ',
+                                    '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%d']:
+                                try:
+                                    converted = datetime.strptime(value, fmt)
+                                    break
+                                except:
+                                    continue
+                            else:
+                                # ISO format (最後的回退)
+                                try:
+                                    converted = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                                except:
+                                    converted = value
                         else:
                             converted = value
                     except:
@@ -996,10 +1596,24 @@ class MongoDBAdapter(BaseQueryComposer):
                         converted = ObjectId(value)
                     except:
                         converted = value
+                elif key == '$numberLong':
+                    try:
+                        converted = int(value)
+                    except:
+                        converted = value
+                elif key == '$numberDecimal':
+                    try:
+                        converted = float(value)
+                    except:
+                        converted = value
                 else:
+                    # 遞迴處理，但不改變字段引用
                     converted[key] = self._safe_convert_types(value)
             return converted
         elif isinstance(obj, list):
             return [self._safe_convert_types(item) for item in obj]
+        elif isinstance(obj, str):
+            # 不要自動轉換字串為日期，除非明確標記
+            return obj
         else:
             return obj
