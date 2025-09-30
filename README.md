@@ -63,7 +63,3 @@ result = await pg_adapter.sql_execution("SELECT * FROM users LIMIT 10")
 - aiomysql - MySQL 異步驅動
 - motor/pymongo - MongoDB 驅動
 - 其他相關套件
-
-## 授權
-
-MIT License
