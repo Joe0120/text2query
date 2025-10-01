@@ -128,34 +128,185 @@ class MySQLAdapter(BaseQueryComposer):
                 "ori_sql_command": sql_command,
             }
 
-    async def get_sql_struct_str(self) -> str:
+    async def _get_schema_info(self) -> Optional[Dict[str, Any]]:
         """
-        獲取當前資料庫中所有表的 SQL 結構字符串
-        
+        獲取資料庫 schema 信息（核心方法）
+
         Returns:
-            str: 包含所有表結構的 CREATE TABLE 語句字符串
+            Optional[Dict]: 包含資料庫和表信息的字典
+                {
+                    "database": "db_name",
+                    "schema": "",  # MySQL 沒有 schema 概念
+                    "tables": [
+                        {
+                            "table_name": "name",
+                            "columns": [{column_info}, ...],
+                            "primary_keys": [{pk_info}, ...],
+                            "indexes": [{index_info}, ...]
+                        },
+                        ...
+                    ]
+                }
         """
         current_database = self._get_current_database()
-        
+
         try:
             pool = await self._get_pool()
             async with pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     tables = await self._get_database_tables(cursor, current_database)
+
                     if not tables:
-                        return ""
-                    
-                    table_structures = []
+                        return None
+
+                    tables_info = []
                     for table in tables:
-                        table_sql = await self._build_table_structure(cursor, current_database, table['table_name'])
-                        if table_sql:
-                            table_structures.append(table_sql)
-                    
-                    return "\n\n".join(table_structures)
-                    
+                        table_name = table['table_name']
+
+                        # 獲取列信息
+                        columns_info = await self._get_table_columns(cursor, current_database, table_name)
+
+                        # 獲取主鍵信息
+                        primary_keys = await self._get_table_primary_keys(cursor, current_database, table_name)
+
+                        # 獲取索引信息
+                        indexes = await self._get_table_indexes(cursor, current_database, table_name)
+
+                        tables_info.append({
+                            "table_name": table_name,
+                            "columns": columns_info,
+                            "primary_keys": primary_keys,
+                            "indexes": indexes
+                        })
+
+                    return {
+                        "database": current_database,
+                        "schema": "",  # MySQL 沒有 schema 概念
+                        "tables": tables_info
+                    }
+
+        except Exception as error:
+            self.logger.error("Failed to get schema info: %s", error)
+            raise
+
+    def _format_column_type(self, col: Dict) -> str:
+        """格式化列類型"""
+        col_type = col['data_type']
+        if col['character_maximum_length']:
+            return f"{col_type}({col['character_maximum_length']})"
+        elif col['numeric_precision'] and col['numeric_scale']:
+            return f"{col_type}({col['numeric_precision']},{col['numeric_scale']})"
+        elif col['numeric_precision']:
+            return f"{col_type}({col['numeric_precision']})"
+        return col_type
+
+    async def get_schema_list(self) -> List[Dict[str, Any]]:
+        """
+        獲取結構化的資料庫 schema 信息
+
+        Returns:
+            List[Dict]: 包含每個表的結構化信息
+                [{
+                    "type": "mysql",
+                    "database": "db_name",
+                    "schema": "",  # MySQL 沒有 schema
+                    "table": "table_name",
+                    "full_path": "db_name.table_name",
+                    "columns": [{"column_name": "type"}, ...]
+                }]
+        """
+        try:
+            schema_data = await self._get_schema_info()
+            if not schema_data:
+                return []
+
+            database_name = schema_data['database']
+            result = []
+
+            for table_info in schema_data['tables']:
+                table_name = table_info['table_name']
+                columns_info = table_info['columns']
+
+                # 轉換為簡化的 {column_name: type} 格式
+                columns = []
+                for col in columns_info:
+                    col_name = col['column_name']
+                    col_type = self._format_column_type(col)
+                    columns.append({col_name: col_type})
+
+                result.append({
+                    "type": "mysql",
+                    "database": database_name,
+                    "schema": "",
+                    "table": table_name,
+                    "full_path": f"{database_name}.{table_name}",
+                    "columns": columns
+                })
+
+            return result
+
+        except Exception as error:
+            self.logger.error("Failed to get structured schema: %s", error)
+            return []
+
+    async def get_schema_str(self) -> str:
+        """
+        獲取當前資料庫中所有表的 SQL 結構字符串
+
+        Returns:
+            str: 包含所有表結構的 CREATE TABLE 語句字符串
+        """
+        try:
+            schema_data = await self._get_schema_info()
+            if not schema_data or not schema_data.get('tables'):
+                return ""
+
+            table_structures = []
+            for table_info in schema_data['tables']:
+                table_sql = self._build_create_table(table_info)
+                if table_sql:
+                    table_structures.append(table_sql)
+
+            return "\n\n".join(table_structures)
+
         except Exception as error:
             self.logger.error("Failed to get SQL struct string: %s", error)
             return ""
+
+    def _build_create_table(self, table_info: Dict[str, Any]) -> str:
+        """將結構化信息格式化為 CREATE TABLE 語句"""
+        table_name = table_info['table_name']
+        columns_full = table_info.get('columns', [])
+        primary_keys = table_info.get('primary_keys', [])
+        indexes = table_info.get('indexes', [])
+
+        if not columns_full:
+            return ""
+
+        col_definitions = []
+
+        # 處理列定義
+        for column in columns_full:
+            col_def = self._format_column_definition(column)
+            col_definitions.append(col_def)
+
+        # 添加主鍵約束
+        if primary_keys:
+            pk_columns = ", ".join([f"`{pk['column_name']}`" for pk in primary_keys])
+            col_definitions.append(f"    PRIMARY KEY ({pk_columns})")
+
+        # 添加唯一索引
+        for index in indexes:
+            if index['non_unique'] == 0 and index['key_name'] != 'PRIMARY':
+                idx_columns = ", ".join([f"`{col}`" for col in index['columns']])
+                col_definitions.append(f"    UNIQUE KEY `{index['key_name']}` ({idx_columns})")
+
+        # 組合最終的 CREATE TABLE 語句
+        create_table = f'CREATE TABLE `{table_name}` (\n'
+        create_table += ",\n".join(col_definitions)
+        create_table += "\n);"
+
+        return create_table
 
     # ============================================================================
     # 3. 連線池管理

@@ -115,51 +115,175 @@ class MongoDBAdapter(BaseQueryComposer):
                 'execution_time': execution_time
             }
 
-    async def get_sql_struct_str(self) -> str:
+    async def get_schema_str(self) -> str:
         """
         獲取 MongoDB 資料庫結構字符串
-        
+
         Returns:
             str: 包含所有集合結構的描述字符串
         """
         try:
+            schema_data = await self._get_schema_info()
+
+            if schema_data is None:
+                return "MongoDB database has no collections"
+
+            database_name = schema_data['database']
+            collections_info = schema_data['collections']
+
+            struct_parts = []
+            struct_parts.append(f"MongoDB Connection:")
+            struct_parts.append(f"Database: {database_name}")
+            struct_parts.append("=" * 50)
+
+            for collection_info in collections_info:
+                collection_name = collection_info['collection_name']
+                count = collection_info['document_count']
+                fields = collection_info['fields']
+                sample_docs = collection_info['sample_docs']
+                error = collection_info.get('error')
+
+                if error:
+                    struct_parts.append(f"\nCollection: {collection_name}")
+                    struct_parts.append(f"Analysis failed: {error}")
+                    struct_parts.append("-" * 30)
+                    continue
+
+                struct_parts.append(f"\nCollection: {collection_name}")
+                struct_parts.append(f"Document count: {count}")
+
+                if fields:
+                    struct_parts.append("Fields:")
+                    for field_name, field_type in sorted(fields.items()):
+                        struct_parts.append(f"  - {field_name}: {field_type}")
+
+                    if sample_docs:
+                        struct_parts.append("Sample data:")
+                        for i, doc in enumerate(sample_docs[:2], 1):
+                            serialized_doc = self._serialize_document_for_display(doc)
+                            struct_parts.append(f"  Example {i}: {serialized_doc}")
+
+                struct_parts.append("-" * 30)
+
+            return "\n".join(struct_parts)
+
+        except Exception as error:
+            self.logger.error("Failed to get MongoDB struct string: %s", error)
+            return f"Error retrieving MongoDB structure: {str(error)}"
+
+    async def get_schema_list(self) -> List[Dict[str, Any]]:
+        """
+        獲取結構化的資料庫 schema 信息
+
+        Returns:
+            List[Dict]: 包含每個集合的結構化信息
+                [{
+                    "type": "mongodb",
+                    "database": "db_name",
+                    "schema": "",  # MongoDB 沒有 schema
+                    "table": "collection_name",  # collection 對應 table
+                    "full_path": "db_name.collection_name",
+                    "columns": [{"field_name": "type"}, ...]
+                }]
+        """
+        try:
+            schema_data = await self._get_schema_info()
+
+            if schema_data is None:
+                return []
+
+            database_name = schema_data['database']
+            collections_info = schema_data['collections']
+
+            result = []
+            for collection_info in collections_info:
+                if collection_info.get('error'):
+                    continue
+
+                collection_name = collection_info['collection_name']
+                fields = collection_info['fields']
+
+                columns = [{field_name: field_type} for field_name, field_type in sorted(fields.items())]
+
+                result.append({
+                    "type": "mongodb",
+                    "database": database_name,
+                    "schema": "",  # MongoDB 沒有 schema 概念
+                    "table": collection_name,
+                    "full_path": f"{database_name}.{collection_name}",
+                    "columns": columns
+                })
+
+            return result
+
+        except Exception as error:
+            self.logger.error("Failed to get structured schema: %s", error)
+            return []
+
+    async def _get_schema_info(self) -> Optional[Dict[str, Any]]:
+        """
+        分析所有集合的 schema 信息（核心方法）
+
+        Returns:
+            Optional[Dict]: 包含資料庫和集合信息的字典
+                {
+                    "database": "db_name",
+                    "collections": [
+                        {
+                            "collection_name": "name",
+                            "document_count": 100,
+                            "fields": {"field_name": "type", ...},
+                            "sample_docs": [{...}, ...],
+                            "error": "error_message"  # 僅在錯誤時存在
+                        },
+                        ...
+                    ]
+                }
+            如果沒有集合則返回 None
+        """
+        try:
             if self._client is None or self._db is None:
                 await self._get_connection()
-            
+
             connection_info = self._build_connection_info()
+            database_name = connection_info['database']
             collections = connection_info.get('collections', [])
-            
+
             if not collections:
                 # 如果沒有指定集合，獲取所有集合
                 collections = await self._db.list_collection_names()
                 if not collections:
-                    return "MongoDB database has no collections"
-            
-            struct_parts = []
-            struct_parts.append(f"MongoDB Connection:")
-            struct_parts.append(f"Database: {connection_info['database']}")
-            struct_parts.append("=" * 50)
-            
+                    return None
+
+            collections_info = []
+
             for collection_name in collections:
+                collection_data = {
+                    "collection_name": collection_name,
+                    "document_count": 0,
+                    "fields": {},
+                    "sample_docs": []
+                }
+
                 try:
                     # 獲取集合統計
                     count = await self._db[collection_name].count_documents({})
-                    struct_parts.append(f"\nCollection: {collection_name}")
-                    struct_parts.append(f"Document count: {count}")
-                    
+                    collection_data["document_count"] = count
+
                     if count > 0:
                         # 獲取樣本文檔來分析結構
                         cursor = self._db[collection_name].find({}).limit(3)
                         sample_docs = await cursor.to_list(length=3)
-                        
+                        collection_data["sample_docs"] = sample_docs
+
                         if sample_docs:
-                            # 收集所有字段
+                            # 收集所有字段並分析類型
+                            fields = {}
                             all_fields = set()
                             for doc in sample_docs:
                                 all_fields.update(doc.keys())
-                            
-                            struct_parts.append("Fields:")
-                            for field in sorted(all_fields):
+
+                            for field in all_fields:
                                 # 分析字段類型
                                 field_type = "unknown"
                                 for doc in sample_docs:
@@ -178,27 +302,25 @@ class MongoDBAdapter(BaseQueryComposer):
                                         elif isinstance(value, datetime):
                                             field_type = "date"
                                         break
-                                
-                                struct_parts.append(f"  - {field}: {field_type}")
-                            
-                            # 添加示例數據
-                            struct_parts.append("Sample data:")
-                            for i, doc in enumerate(sample_docs[:2], 1):
-                                # 序列化文檔以便顯示
-                                serialized_doc = self._serialize_document_for_display(doc)
-                                struct_parts.append(f"  Example {i}: {serialized_doc}")
-                    
-                    struct_parts.append("-" * 30)
-                    
+
+                                fields[field] = field_type
+
+                            collection_data["fields"] = fields
+
                 except Exception as collection_error:
-                    struct_parts.append(f"Collection {collection_name} analysis failed: {str(collection_error)}")
-                    struct_parts.append("-" * 30)
-            
-            return "\n".join(struct_parts)
-            
+                    self.logger.warning(f"Failed to analyze collection {collection_name}: {collection_error}")
+                    collection_data["error"] = str(collection_error)
+
+                collections_info.append(collection_data)
+
+            return {
+                "database": database_name,
+                "collections": collections_info
+            }
+
         except Exception as error:
-            self.logger.error("Failed to get MongoDB struct string: %s", error)
-            return f"Error retrieving MongoDB structure: {str(error)}"
+            self.logger.error("Failed to analyze collections schema: %s", error)
+            raise
 
     async def close_conn(self) -> None:
         """Close the MongoDB connection."""

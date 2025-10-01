@@ -104,28 +104,235 @@ class OracleAdapter(BaseQueryComposer):
             "metadata": execution["metadata"],
         }
 
-    async def get_sql_struct_str(self) -> str:
+    async def _get_schema_info(self) -> Optional[Dict[str, Any]]:
         """
-        獲取當前 schema 中所有表的 SQL 結構字符串
-        
+        獲取資料庫 schema 信息（核心方法）
+
         Returns:
-            str: 包含所有表結構的 CREATE TABLE 語句字符串
+            Optional[Dict]: 包含資料庫、schema 和表信息的字典
+                {
+                    "database": "",  # Oracle 沒有傳統的 database 概念
+                    "schema": "schema_name",
+                    "tables": [
+                        {
+                            "table_name": "name",
+                            "columns": [{column_info}, ...],
+                            "primary_keys": [{pk_info}, ...],
+                            "create_sql": "CREATE TABLE ..."
+                        },
+                        ...
+                    ]
+                }
         """
         current_schema = self._get_current_schema()
-        
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = asyncio.get_event_loop()
 
         try:
-            structures = await loop.run_in_executor(
-                None, self._fetch_table_structures, current_schema
+            schema_data = await loop.run_in_executor(
+                None, self._fetch_schema_info_sync, current_schema
             )
-            return "\n\n".join(structures)
+            return schema_data
+        except Exception as error:
+            self.logger.error("Failed to get schema info: %s", error)
+            raise
+
+    def _fetch_schema_info_sync(self, schema: str) -> Optional[Dict[str, Any]]:
+        """在執行器中同步獲取 schema 信息"""
+        import oracledb
+
+        if not isinstance(self.config, OracleConfig):
+            raise RuntimeError("OracleAdapter requires a valid Oracle configuration")
+
+        cfg = self.config
+        dsn = cfg.get_dsn()
+
+        # 確定連接的用戶
+        if cfg.database_name.upper() in ['SYSTEM', 'SYS', 'XE']:
+            user = cfg.username
+        else:
+            user = cfg.database_name
+
+        connection = oracledb.connect(
+            user=user,
+            password=cfg.password,
+            dsn=dsn
+        )
+
+        cursor = connection.cursor()
+
+        try:
+            # 獲取所有用戶表
+            cursor.execute("""
+                SELECT TABLE_NAME
+                FROM USER_TABLES
+                ORDER BY TABLE_NAME
+            """)
+
+            tables = cursor.fetchall()
+
+            if not tables:
+                return None
+
+            tables_info = []
+            for (table_name,) in tables:
+                # 獲取列信息
+                cursor.execute("""
+                    SELECT
+                        COLUMN_NAME,
+                        DATA_TYPE,
+                        DATA_LENGTH,
+                        DATA_PRECISION,
+                        DATA_SCALE,
+                        NULLABLE,
+                        DATA_DEFAULT
+                    FROM
+                        USER_TAB_COLUMNS
+                    WHERE
+                        TABLE_NAME = :table_name
+                    ORDER BY
+                        COLUMN_ID
+                """, {"table_name": table_name})
+
+                columns_info = cursor.fetchall()
+
+                columns = []
+                for col in columns_info:
+                    col_name, data_type, data_len, data_prec, data_scale, nullable, data_default = col
+                    columns.append({
+                        "column_name": col_name,
+                        "data_type": data_type,
+                        "data_length": data_len,
+                        "data_precision": data_prec,
+                        "data_scale": data_scale,
+                        "nullable": nullable,
+                        "data_default": data_default
+                    })
+
+                # 獲取主鍵信息
+                cursor.execute("""
+                    SELECT cols.COLUMN_NAME
+                    FROM USER_CONSTRAINTS cons
+                    JOIN USER_CONS_COLUMNS cols ON cons.CONSTRAINT_NAME = cols.CONSTRAINT_NAME
+                    WHERE cons.TABLE_NAME = :table_name
+                      AND cons.CONSTRAINT_TYPE = 'P'
+                    ORDER BY cols.POSITION
+                """, {"table_name": table_name})
+
+                primary_keys = [{"column_name": row[0]} for row in cursor.fetchall()]
+
+                # 構建 CREATE TABLE 語句
+                create_sql = self._build_table_structure_from_info(
+                    table_name, columns, primary_keys
+                )
+
+                tables_info.append({
+                    "table_name": table_name,
+                    "columns": columns,
+                    "primary_keys": primary_keys,
+                    "create_sql": create_sql
+                })
+
+            return {
+                "database": "",  # Oracle 沒有傳統的 database 概念
+                "schema": schema,
+                "tables": tables_info
+            }
+
+        finally:
+            cursor.close()
+            connection.close()
+
+    async def get_schema_str(self) -> str:
+        """
+        獲取當前 schema 中所有表的 SQL 結構字符串
+
+        Returns:
+            str: 包含所有表結構的 CREATE TABLE 語句字符串
+        """
+        try:
+            schema_data = await self._get_schema_info()
+            if not schema_data or not schema_data.get('tables'):
+                return ""
+
+            table_structures = []
+            for table_info in schema_data['tables']:
+                if table_info.get('create_sql'):
+                    table_structures.append(table_info['create_sql'])
+
+            return "\n\n".join(table_structures)
+
         except Exception as error:
             self.logger.error("Failed to get SQL struct string: %s", error)
             return ""
+
+    async def get_schema_list(self) -> List[Dict[str, Any]]:
+        """
+        獲取結構化的資料庫 schema 信息
+
+        Returns:
+            List[Dict]: 包含每個表的結構化信息
+                [{
+                    "type": "oracle",
+                    "database": "",  # Oracle 沒有傳統的 database 概念
+                    "schema": "schema_name",  # Oracle schema 相當於 database
+                    "table": "table_name",
+                    "full_path": "schema_name.table_name",
+                    "columns": [{"column_name": "type"}, ...]
+                }]
+        """
+        try:
+            schema_data = await self._get_schema_info()
+            if not schema_data:
+                return []
+
+            schema_name = schema_data['schema']
+            result = []
+
+            for table_info in schema_data['tables']:
+                table_name = table_info['table_name']
+                columns_info = table_info['columns']
+
+                # 轉換為簡化的 {column_name: type} 格式
+                columns = []
+                for col in columns_info:
+                    col_name = col['column_name']
+                    data_type = col['data_type']
+                    data_len = col['data_length']
+                    data_prec = col['data_precision']
+                    data_scale = col['data_scale']
+
+                    col_type = data_type
+                    # 添加長度或精度信息
+                    if data_type in ('VARCHAR2', 'CHAR', 'NVARCHAR2', 'NCHAR'):
+                        col_type = f"{data_type}({data_len})"
+                    elif data_type == 'NUMBER':
+                        if data_prec and data_scale:
+                            col_type = f"NUMBER({data_prec},{data_scale})"
+                        elif data_prec:
+                            col_type = f"NUMBER({data_prec})"
+                    elif data_type in ('RAW', 'LONG RAW'):
+                        col_type = f"{data_type}({data_len})"
+
+                    columns.append({col_name: col_type})
+
+                result.append({
+                    "type": "oracle",
+                    "database": "",  # Oracle 沒有傳統的 database 概念
+                    "schema": schema_name,
+                    "table": table_name,
+                    "full_path": f"{schema_name}.{table_name}",
+                    "columns": columns
+                })
+
+            return result
+
+        except Exception as error:
+            self.logger.error("Failed to get structured schema: %s", error)
+            return []
 
     # ============================================================================
     # 3. SQL 處理和安全檢查
@@ -398,109 +605,45 @@ class OracleAdapter(BaseQueryComposer):
             return self.config.database_name.upper()
         return "SYSTEM"
 
-    def _fetch_table_structures(self, schema: str) -> List[str]:
-        """Fetch CREATE TABLE statements for all tables."""
-        import oracledb
-        
-        if not isinstance(self.config, OracleConfig):
-            raise RuntimeError("OracleAdapter requires a valid Oracle configuration")
-        
-        cfg = self.config
-        dsn = cfg.get_dsn()
-        
-        # 確定連接的用戶
-        if cfg.database_name.upper() in ['SYSTEM', 'SYS', 'XE']:
-            user = cfg.username
-        else:
-            user = cfg.database_name
-        
-        connection = oracledb.connect(
-            user=user,
-            password=cfg.password,
-            dsn=dsn
-        )
-        
-        cursor = connection.cursor()
-        structures: List[str] = []
-
-        try:
-            # 獲取所有用戶表
-            cursor.execute("""
-                SELECT TABLE_NAME
-                FROM USER_TABLES
-                ORDER BY TABLE_NAME
-            """)
-            
-            tables = cursor.fetchall()
-
-            for (table_name,) in tables:
-                table_sql = self._build_table_structure_sync(cursor, schema, table_name)
-                if table_sql:
-                    structures.append(table_sql)
-
-            return structures
-
-        finally:
-            cursor.close()
-            connection.close()
-
-    def _build_table_structure_sync(self, cursor, schema: str, table_name: str) -> str:
-        """構建單個表的 CREATE TABLE 語句"""
-        # 獲取列信息
-        cursor.execute("""
-            SELECT
-                COLUMN_NAME,
-                DATA_TYPE,
-                DATA_LENGTH,
-                DATA_PRECISION,
-                DATA_SCALE,
-                NULLABLE,
-                DATA_DEFAULT
-            FROM
-                USER_TAB_COLUMNS
-            WHERE
-                TABLE_NAME = :table_name
-            ORDER BY
-                COLUMN_ID
-        """, {"table_name": table_name})
-        
-        columns = cursor.fetchall()
+    def _build_table_structure_from_info(
+        self,
+        table_name: str,
+        columns: List[Dict[str, Any]],
+        primary_keys: List[Dict[str, str]]
+    ) -> str:
+        """從結構化信息構建 CREATE TABLE 語句"""
         if not columns:
             return ""
-        
-        # 獲取主鍵信息
-        cursor.execute("""
-            SELECT cols.COLUMN_NAME
-            FROM USER_CONSTRAINTS cons
-            JOIN USER_CONS_COLUMNS cols ON cons.CONSTRAINT_NAME = cols.CONSTRAINT_NAME
-            WHERE cons.TABLE_NAME = :table_name
-              AND cons.CONSTRAINT_TYPE = 'P'
-            ORDER BY cols.POSITION
-        """, {"table_name": table_name})
-        
-        primary_keys = [row[0] for row in cursor.fetchall()]
-        
-        # 構建 CREATE TABLE 語句
+
         col_definitions = []
-        
+
         for col in columns:
-            col_name, data_type, data_length, data_precision, data_scale, nullable, data_default = col
+            col_name = col['column_name']
+            data_type = col['data_type']
+            data_length = col['data_length']
+            data_precision = col['data_precision']
+            data_scale = col['data_scale']
+            nullable = col['nullable']
+            data_default = col['data_default']
+
             col_def = self._format_column_definition_sync(
-                col_name, data_type, data_length, data_precision, data_scale, nullable, data_default
+                col_name, data_type, data_length, data_precision,
+                data_scale, nullable, data_default
             )
             col_definitions.append(col_def)
-        
+
         # 添加主鍵約束
         if primary_keys:
-            pk_columns = ", ".join([f'"{pk}"' for pk in primary_keys])
+            pk_columns = ", ".join([f'"{pk["column_name"]}"' for pk in primary_keys])
             col_definitions.append(f"    PRIMARY KEY ({pk_columns})")
-        
+
         # 組合最終的 CREATE TABLE 語句
         create_table = f'CREATE TABLE "{table_name}" (\n'
         create_table += ",\n".join(col_definitions)
         create_table += "\n);"
-        
+
         return create_table
+
 
     def _format_column_definition_sync(
         self,

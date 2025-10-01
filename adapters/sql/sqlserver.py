@@ -104,28 +104,238 @@ class SQLServerAdapter(BaseQueryComposer):
             "metadata": execution["metadata"],
         }
 
-    async def get_sql_struct_str(self) -> str:
+    async def _get_schema_info(self) -> Optional[Dict[str, Any]]:
         """
-        獲取當前資料庫中所有表的 SQL 結構字符串
-        
+        獲取資料庫 schema 信息（核心方法）
+
         Returns:
-            str: 包含所有表結構的 CREATE TABLE 語句字符串
+            Optional[Dict]: 包含資料庫、schema 和表信息的字典
+                {
+                    "database": "db_name",
+                    "tables": [
+                        {
+                            "schema_name": "schema_name",
+                            "table_name": "name",
+                            "columns": [{column_info}, ...],
+                            "primary_keys": [{pk_info}, ...],
+                            "create_sql": "CREATE TABLE ..."
+                        },
+                        ...
+                    ]
+                }
         """
         current_database = self._get_current_database()
-        
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = asyncio.get_event_loop()
 
         try:
-            structures = await loop.run_in_executor(
-                None, self._fetch_table_structures, current_database
+            schema_data = await loop.run_in_executor(
+                None, self._fetch_schema_info_sync, current_database
             )
-            return "\n\n".join(structures)
+            return schema_data
+        except Exception as error:
+            self.logger.error("Failed to get schema info: %s", error)
+            raise
+
+    def _fetch_schema_info_sync(self, database: str) -> Optional[Dict[str, Any]]:
+        """在執行器中同步獲取 schema 信息"""
+        import pymssql
+
+        if not isinstance(self.config, SQLServerConfig):
+            raise RuntimeError("SQLServerAdapter requires a valid SQL Server configuration")
+
+        cfg = self.config
+
+        connection = pymssql.connect(
+            server=cfg.host,
+            port=cfg.port,
+            user=cfg.username,
+            password=cfg.password,
+            database=database,
+            timeout=cfg.timeout,
+            charset=cfg.charset,
+        )
+
+        cursor = connection.cursor()
+
+        try:
+            # 獲取所有用戶表
+            cursor.execute("""
+                SELECT TABLE_SCHEMA, TABLE_NAME
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_TYPE = 'BASE TABLE'
+                  AND TABLE_CATALOG = %s
+                ORDER BY TABLE_SCHEMA, TABLE_NAME
+            """, (database,))
+
+            tables = cursor.fetchall()
+
+            if not tables:
+                return None
+
+            tables_info = []
+            for schema_name, table_name in tables:
+                # 獲取列信息
+                cursor.execute("""
+                    SELECT
+                        COLUMN_NAME,
+                        DATA_TYPE,
+                        CHARACTER_MAXIMUM_LENGTH,
+                        NUMERIC_PRECISION,
+                        NUMERIC_SCALE,
+                        IS_NULLABLE,
+                        COLUMN_DEFAULT
+                    FROM
+                        INFORMATION_SCHEMA.COLUMNS
+                    WHERE
+                        TABLE_CATALOG = %s
+                        AND TABLE_SCHEMA = %s
+                        AND TABLE_NAME = %s
+                    ORDER BY
+                        ORDINAL_POSITION
+                """, (database, schema_name, table_name))
+
+                columns_info = cursor.fetchall()
+
+                columns = []
+                for col in columns_info:
+                    col_name, data_type, char_max_len, num_precision, num_scale, is_nullable, col_default = col
+                    columns.append({
+                        "column_name": col_name,
+                        "data_type": data_type,
+                        "character_maximum_length": char_max_len,
+                        "numeric_precision": num_precision,
+                        "numeric_scale": num_scale,
+                        "is_nullable": is_nullable,
+                        "column_default": col_default
+                    })
+
+                # 獲取主鍵信息
+                cursor.execute("""
+                    SELECT COLUMN_NAME
+                    FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+                    WHERE TABLE_CATALOG = %s
+                      AND TABLE_SCHEMA = %s
+                      AND TABLE_NAME = %s
+                      AND CONSTRAINT_NAME LIKE 'PK_%%'
+                    ORDER BY ORDINAL_POSITION
+                """, (database, schema_name, table_name))
+
+                primary_keys = [{"column_name": row[0]} for row in cursor.fetchall()]
+
+                # 構建 CREATE TABLE 語句
+                create_sql = self._build_table_structure_from_info(
+                    table_name, columns, primary_keys
+                )
+
+                tables_info.append({
+                    "schema_name": schema_name,
+                    "table_name": table_name,
+                    "columns": columns,
+                    "primary_keys": primary_keys,
+                    "create_sql": create_sql
+                })
+
+            return {
+                "database": database,
+                "tables": tables_info
+            }
+
+        finally:
+            cursor.close()
+            connection.close()
+
+    async def get_schema_str(self) -> str:
+        """
+        獲取當前資料庫中所有表的 SQL 結構字符串
+
+        Returns:
+            str: 包含所有表結構的 CREATE TABLE 語句字符串
+        """
+        try:
+            schema_data = await self._get_schema_info()
+            if not schema_data or not schema_data.get('tables'):
+                return ""
+
+            table_structures = []
+            for table_info in schema_data['tables']:
+                if table_info.get('create_sql'):
+                    table_structures.append(table_info['create_sql'])
+
+            return "\n\n".join(table_structures)
+
         except Exception as error:
             self.logger.error("Failed to get SQL struct string: %s", error)
             return ""
+
+    async def get_schema_list(self) -> List[Dict[str, Any]]:
+        """
+        獲取結構化的資料庫 schema 信息
+
+        Returns:
+            List[Dict]: 包含每個表的結構化信息
+                [{
+                    "type": "sqlserver",
+                    "database": "db_name",
+                    "schema": "schema_name",  # SQL Server 有 schema (通常是 dbo)
+                    "table": "table_name",
+                    "full_path": "db_name.schema_name.table_name",
+                    "columns": [{"column_name": "type"}, ...]
+                }]
+        """
+        try:
+            schema_data = await self._get_schema_info()
+            if not schema_data:
+                return []
+
+            database_name = schema_data['database']
+            result = []
+
+            for table_info in schema_data['tables']:
+                schema_name = table_info['schema_name']
+                table_name = table_info['table_name']
+                columns_info = table_info['columns']
+
+                # 轉換為簡化的 {column_name: type} 格式
+                columns = []
+                for col in columns_info:
+                    col_name = col['column_name']
+                    data_type = col['data_type']
+                    char_len = col['character_maximum_length']
+                    num_prec = col['numeric_precision']
+                    num_scale = col['numeric_scale']
+
+                    col_type = data_type
+                    # 添加長度或精度信息
+                    if char_len:
+                        if char_len == -1:
+                            col_type = f"{data_type}(MAX)"
+                        else:
+                            col_type = f"{data_type}({char_len})"
+                    elif num_prec and num_scale:
+                        col_type = f"{data_type}({num_prec},{num_scale})"
+                    elif num_prec:
+                        col_type = f"{data_type}({num_prec})"
+
+                    columns.append({col_name: col_type})
+
+                result.append({
+                    "type": "sqlserver",
+                    "database": database_name,
+                    "schema": schema_name,
+                    "table": table_name,
+                    "full_path": f"{database_name}.{schema_name}.{table_name}",
+                    "columns": columns
+                })
+
+            return result
+
+        except Exception as error:
+            self.logger.error("Failed to get structured schema: %s", error)
+            return []
 
     # ============================================================================
     # 3. SQL 處理和安全檢查
@@ -376,112 +586,45 @@ class SQLServerAdapter(BaseQueryComposer):
             return self.config.database_name
         return "master"
 
-    def _fetch_table_structures(self, database: str) -> List[str]:
-        """Fetch CREATE TABLE statements for all tables."""
-        import pymssql
-        
-        if not isinstance(self.config, SQLServerConfig):
-            raise RuntimeError("SQLServerAdapter requires a valid SQL Server configuration")
-        
-        cfg = self.config
-        
-        connection = pymssql.connect(
-            server=cfg.host,
-            port=cfg.port,
-            user=cfg.username,
-            password=cfg.password,
-            database=database,
-            timeout=cfg.timeout,
-            charset=cfg.charset,
-        )
-        
-        cursor = connection.cursor()
-        structures: List[str] = []
-
-        try:
-            # 獲取所有用戶表
-            cursor.execute("""
-                SELECT TABLE_NAME
-                FROM INFORMATION_SCHEMA.TABLES
-                WHERE TABLE_TYPE = 'BASE TABLE'
-                  AND TABLE_CATALOG = %s
-                  AND TABLE_SCHEMA = 'dbo'
-                ORDER BY TABLE_NAME
-            """, (database,))
-            
-            tables = cursor.fetchall()
-
-            for (table_name,) in tables:
-                table_sql = self._build_table_structure_sync(cursor, database, table_name)
-                if table_sql:
-                    structures.append(table_sql)
-
-            return structures
-
-        finally:
-            cursor.close()
-            connection.close()
-
-    def _build_table_structure_sync(self, cursor, database: str, table_name: str) -> str:
-        """構建單個表的 CREATE TABLE 語句"""
-        # 獲取列信息
-        cursor.execute("""
-            SELECT
-                COLUMN_NAME,
-                DATA_TYPE,
-                CHARACTER_MAXIMUM_LENGTH,
-                NUMERIC_PRECISION,
-                NUMERIC_SCALE,
-                IS_NULLABLE,
-                COLUMN_DEFAULT
-            FROM
-                INFORMATION_SCHEMA.COLUMNS
-            WHERE
-                TABLE_CATALOG = %s
-                AND TABLE_NAME = %s
-                AND TABLE_SCHEMA = 'dbo'
-            ORDER BY
-                ORDINAL_POSITION
-        """, (database, table_name))
-        
-        columns = cursor.fetchall()
+    def _build_table_structure_from_info(
+        self,
+        table_name: str,
+        columns: List[Dict[str, Any]],
+        primary_keys: List[Dict[str, str]]
+    ) -> str:
+        """從結構化信息構建 CREATE TABLE 語句"""
         if not columns:
             return ""
-        
-        # 獲取主鍵信息
-        cursor.execute("""
-            SELECT COLUMN_NAME
-            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-            WHERE TABLE_CATALOG = %s
-              AND TABLE_NAME = %s
-              AND TABLE_SCHEMA = 'dbo'
-              AND CONSTRAINT_NAME LIKE 'PK_%'
-            ORDER BY ORDINAL_POSITION
-        """, (database, table_name))
-        
-        primary_keys = [row[0] for row in cursor.fetchall()]
-        
-        # 構建 CREATE TABLE 語句
+
         col_definitions = []
-        
+
         for col in columns:
-            col_name, data_type, char_max_len, num_precision, num_scale, is_nullable, col_default = col
+            col_name = col['column_name']
+            data_type = col['data_type']
+            char_max_len = col['character_maximum_length']
+            num_precision = col['numeric_precision']
+            num_scale = col['numeric_scale']
+            is_nullable = col['is_nullable']
+            col_default = col['column_default']
+
             col_def = self._format_column_definition_sync(
-                col_name, data_type, char_max_len, num_precision, num_scale, is_nullable, col_default
+                col_name, data_type, char_max_len, num_precision,
+                num_scale, is_nullable, col_default
             )
             col_definitions.append(col_def)
-        
+
         # 添加主鍵約束
         if primary_keys:
-            pk_columns = ", ".join([f"[{pk}]" for pk in primary_keys])
+            pk_columns = ", ".join([f"[{pk['column_name']}]" for pk in primary_keys])
             col_definitions.append(f"    PRIMARY KEY ({pk_columns})")
-        
+
         # 組合最終的 CREATE TABLE 語句
         create_table = f'CREATE TABLE [{table_name}] (\n'
         create_table += ",\n".join(col_definitions)
         create_table += "\n);"
-        
+
         return create_table
+
 
     def _format_column_definition_sync(
         self,

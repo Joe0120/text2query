@@ -110,7 +110,7 @@ config = MongoDBConfig(
 adapter = MongoDBAdapter(config)
 
 # 2. 獲取資料庫結構
-db_structure = await adapter.get_sql_struct_str()
+db_structure = await adapter.get_schema_str()
 
 # 3. 設置 LLM（使用您自己的 LlamaIndex LLM）
 llm = OpenAI(model="gpt-4", api_key="your-api-key")
@@ -225,7 +225,7 @@ query2 = await t2s.generate_query("只顯示前 10 個")  # 會參考之前的�
 
 **參數：**
 - `llm` (Any): LlamaIndex LLM 實例
-- `db_structure` (str): 資料庫結構字串（從 `adapter.get_sql_struct_str()` 獲取）
+- `db_structure` (str): 資料庫結構字串（從 `adapter.get_schema_str()` 獲取）
 - `chat_history` (Optional[Any]): ChatMemoryBuffer.memory 格式的對話歷史
 - `db_type` (str): 資料庫類型（"postgresql", "mysql", "mongodb", "sqlite"）
 
@@ -240,7 +240,7 @@ query2 = await t2s.generate_query("只顯示前 10 個")  # 會參考之前的�
 所有 adapter 都繼承自 `BaseQueryComposer` 並提供以下方法：
 
 - `async test_connection()`: 測試資料庫連線
-- `async get_sql_struct_str()`: 獲取資料庫結構字串
+- `async get_schema_str()`: 獲取資料庫結構字串
 - `async sql_execution(command, params=None, safe=True, limit=1000)`: 執行查詢
 - `async close_conn()`: 關閉連線
 

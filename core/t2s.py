@@ -28,7 +28,7 @@ class Text2SQL:
         Args:
             llm: LlamaIndex LLM instance (e.g., OpenAI, Anthropic, etc.)
             db_structure: Database structure information string
-                         (from adapter.get_sql_struct_str())
+                         (from adapter.get_schema_str())
             chat_history: Optional ChatMemoryBuffer.memory for conversation context
             db_type: Database type (postgresql, mysql, mongodb, sqlite)
 
@@ -37,7 +37,7 @@ class Text2SQL:
             >>> from text2query.core.t2s import Text2SQL
             >>>
             >>> llm = OpenAI(model="gpt-4", api_key="your-key")
-            >>> db_structure = await adapter.get_sql_struct_str()
+            >>> db_structure = await adapter.get_schema_str()
             >>> t2s = Text2SQL(llm=llm, db_structure=db_structure, db_type="mongodb")
             >>> query = await t2s.generate_query("每個部門有多少經理？")
         """

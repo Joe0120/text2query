@@ -121,33 +121,147 @@ class PostgreSQLAdapter(BaseQueryComposer):
                 "ori_sql_command": sql_command,
             }
 
-    async def get_sql_struct_str(self) -> str:
+    async def get_schema_str(self) -> str:
         """
         獲取當前 schema 中所有表的 SQL 結構字符串
-        
+
         Returns:
             str: 包含所有表結構的 CREATE TABLE 語句字符串
         """
+        try:
+            schema_data = await self._get_schema_info()
+            if not schema_data or not schema_data.get('tables'):
+                return ""
+
+            table_structures = []
+            for table_info in schema_data['tables']:
+                if table_info.get('create_sql'):
+                    table_structures.append(table_info['create_sql'])
+
+            return "\n\n".join(table_structures)
+
+        except Exception as error:
+            self.logger.error("Failed to get SQL struct string: %s", error)
+            return ""
+
+    async def get_schema_list(self) -> List[Dict[str, Any]]:
+        """
+        獲取結構化的資料庫 schema 信息
+
+        Returns:
+            List[Dict]: 包含每個表的結構化信息
+                [{
+                    "type": "postgresql",
+                    "database": "db_name",
+                    "schema": "schema_name",
+                    "table": "table_name",
+                    "full_path": "db_name.schema_name.table_name",
+                    "columns": [{"column_name": "type"}, ...]
+                }]
+        """
+        try:
+            schema_data = await self._get_schema_info()
+            if not schema_data:
+                return []
+
+            database_name = schema_data['database']
+            schema_name = schema_data['schema']
+            result = []
+
+            for table_info in schema_data['tables']:
+                table_name = table_info['table_name']
+                columns_info = table_info['columns']
+
+                # 轉換為簡化的 {column_name: type} 格式
+                columns = []
+                for col in columns_info:
+                    col_name = col['column_name']
+                    col_type = col['data_type']
+
+                    # 添加長度或精度信息
+                    if col['character_maximum_length']:
+                        col_type = f"{col_type}({col['character_maximum_length']})"
+                    elif col['numeric_precision'] and col['numeric_scale']:
+                        col_type = f"{col_type}({col['numeric_precision']},{col['numeric_scale']})"
+                    elif col['numeric_precision']:
+                        col_type = f"{col_type}({col['numeric_precision']})"
+
+                    columns.append({col_name: col_type})
+
+                result.append({
+                    "type": "postgresql",
+                    "database": database_name,
+                    "schema": schema_name,
+                    "table": table_name,
+                    "full_path": f"{database_name}.{schema_name}.{table_name}",
+                    "columns": columns
+                })
+
+            return result
+
+        except Exception as error:
+            self.logger.error("Failed to get structured schema: %s", error)
+            return []
+
+    async def _get_schema_info(self) -> Optional[Dict[str, Any]]:
+        """
+        獲取資料庫 schema 信息（核心方法）
+
+        Returns:
+            Optional[Dict]: 包含資料庫、schema 和表信息的字典
+                {
+                    "database": "db_name",
+                    "schema": "schema_name",
+                    "tables": [
+                        {
+                            "table_name": "name",
+                            "columns": [{column_info}, ...],
+                            "primary_keys": [{pk_info}, ...],
+                            "create_sql": "CREATE TABLE ..."
+                        },
+                        ...
+                    ]
+                }
+        """
         current_schema = self._get_current_schema()
-        
+        current_database = self.config.database_name
+
         try:
             pool = await self._get_pool()
             async with pool.acquire() as conn:
                 tables = await self._get_schema_tables(conn, current_schema)
                 if not tables:
-                    return ""
-                
-                table_structures = []
+                    return None
+
+                tables_info = []
                 for table in tables:
-                    table_sql = await self._build_table_structure(conn, current_schema, table['table_name'])
-                    if table_sql:
-                        table_structures.append(table_sql)
-                
-                return "\n\n".join(table_structures)
-                
+                    table_name = table['table_name']
+
+                    # 獲取列信息
+                    columns_info = await self._get_table_columns(conn, current_schema, table_name)
+
+                    # 獲取主鍵信息
+                    primary_keys = await self._get_table_primary_keys(conn, current_schema, table_name)
+
+                    # 構建 CREATE TABLE 語句
+                    create_sql = await self._build_table_structure(conn, current_schema, table_name)
+
+                    tables_info.append({
+                        "table_name": table_name,
+                        "columns": columns_info,
+                        "primary_keys": primary_keys,
+                        "create_sql": create_sql
+                    })
+
+                return {
+                    "database": current_database,
+                    "schema": current_schema,
+                    "tables": tables_info
+                }
+
         except Exception as error:
-            self.logger.error("Failed to get SQL struct string: %s", error)
-            return ""
+            self.logger.error("Failed to get schema info: %s", error)
+            raise
 
     # ============================================================================
     # 3. 連線池管理

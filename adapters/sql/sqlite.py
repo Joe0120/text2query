@@ -103,12 +103,24 @@ class SQLiteAdapter(BaseQueryComposer):
             "metadata": execution["metadata"],
         }
 
-    async def get_sql_struct_str(self) -> str:
+    async def _get_schema_info(self) -> Optional[Dict[str, Any]]:
         """
-        獲取 SQLite 資料庫的 SQL 結構字符串
-        
+        獲取資料庫 schema 信息（核心方法）
+
         Returns:
-            str: 包含所有表結構的 CREATE TABLE 語句字符串
+            Optional[Dict]: 包含資料庫和表信息的字典
+                {
+                    "database": "",  # SQLite 沒有 database 概念
+                    "schema": "",  # SQLite 沒有 schema
+                    "tables": [
+                        {
+                            "table_name": "name",
+                            "columns": [{column_info}, ...],
+                            "create_sql": "CREATE TABLE ..."
+                        },
+                        ...
+                    ]
+                }
         """
         try:
             loop = asyncio.get_running_loop()
@@ -116,11 +128,140 @@ class SQLiteAdapter(BaseQueryComposer):
             loop = asyncio.get_event_loop()
 
         try:
-            structures = await loop.run_in_executor(None, self._fetch_table_structures)
-            return "\n\n".join(structures)
+            schema_data = await loop.run_in_executor(None, self._fetch_schema_info_sync)
+            return schema_data
+        except Exception as error:
+            self.logger.error("Failed to get schema info: %s", error)
+            raise
+
+    def _fetch_schema_info_sync(self) -> Optional[Dict[str, Any]]:
+        """在執行器中同步獲取 schema 信息"""
+        connection = sqlite3.connect(
+            self.config.file_path,
+            timeout=self.config.timeout,
+            check_same_thread=False,
+        )
+        cursor = connection.cursor()
+
+        try:
+            self._apply_pragmas(cursor)
+            cursor.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name NOT LIKE 'sqlite_%%'
+                ORDER BY name;
+                """
+            )
+            tables = cursor.fetchall()
+
+            if not tables:
+                return None
+
+            tables_info = []
+            for (table_name,) in tables:
+                # 獲取列信息
+                cursor.execute(f"PRAGMA table_info({self._quote_identifier(table_name)});")
+                columns_raw = cursor.fetchall()
+
+                columns_info = []
+                for cid, name, col_type, notnull, default, pk in columns_raw:
+                    columns_info.append({
+                        "cid": cid,
+                        "name": name,
+                        "type": col_type or 'TEXT',
+                        "notnull": notnull,
+                        "default": default,
+                        "pk": pk
+                    })
+
+                # 構建 CREATE TABLE 語句
+                create_sql = self._reconstruct_table_sql(cursor, table_name)
+
+                tables_info.append({
+                    "table_name": table_name,
+                    "columns": columns_info,
+                    "create_sql": create_sql
+                })
+
+            return {
+                "database": "",  # SQLite 沒有 database 概念
+                "schema": "",  # SQLite 沒有 schema
+                "tables": tables_info
+            }
+
+        finally:
+            cursor.close()
+            connection.close()
+
+    async def get_schema_str(self) -> str:
+        """
+        獲取 SQLite 資料庫的 SQL 結構字符串
+
+        Returns:
+            str: 包含所有表結構的 CREATE TABLE 語句字符串
+        """
+        try:
+            schema_data = await self._get_schema_info()
+            if not schema_data or not schema_data.get('tables'):
+                return ""
+
+            table_structures = []
+            for table_info in schema_data['tables']:
+                if table_info.get('create_sql'):
+                    table_structures.append(table_info['create_sql'])
+
+            return "\n\n".join(table_structures)
+
         except Exception as error:
             self.logger.error("Failed to get SQL struct string: %s", error)
             return ""
+
+    async def get_schema_list(self) -> List[Dict[str, Any]]:
+        """
+        獲取結構化的資料庫 schema 信息
+
+        Returns:
+            List[Dict]: 包含每個表的結構化信息
+                [{
+                    "type": "sqlite",
+                    "database": "",  # SQLite 沒有 database 概念（文件本身就是 database）
+                    "schema": "",  # SQLite 沒有 schema
+                    "table": "table_name",
+                    "full_path": "table_name",
+                    "columns": [{"column_name": "type"}, ...]
+                }]
+        """
+        try:
+            schema_data = await self._get_schema_info()
+            if not schema_data:
+                return []
+
+            result = []
+            for table_info in schema_data['tables']:
+                table_name = table_info['table_name']
+                columns_info = table_info['columns']
+
+                # 轉換為簡化的 {column_name: type} 格式
+                columns = []
+                for col in columns_info:
+                    columns.append({col['name']: col['type']})
+
+                result.append({
+                    "type": "sqlite",
+                    "database": "",  # SQLite 沒有 database 概念
+                    "schema": "",  # SQLite 沒有 schema
+                    "table": table_name,
+                    "full_path": table_name,
+                    "columns": columns
+                })
+
+            return result
+
+        except Exception as error:
+            self.logger.error("Failed to get structured schema: %s", error)
+            return []
 
     # ============================================================================
     # 3. SQL 處理和安全檢查
@@ -310,38 +451,6 @@ class SQLiteAdapter(BaseQueryComposer):
             cursor.close()
             connection.close()
 
-    def _fetch_table_structures(self) -> List[str]:
-        """Fetch CREATE TABLE statements for all tables."""
-        connection = sqlite3.connect(
-            self.config.file_path,
-            timeout=self.config.timeout,
-            check_same_thread=False,
-        )
-        cursor = connection.cursor()
-        structures: List[str] = []
-
-        try:
-            self._apply_pragmas(cursor)
-            cursor.execute(
-                """
-                SELECT name, sql
-                FROM sqlite_master
-                WHERE type = 'table'
-                  AND name NOT LIKE 'sqlite_%%'
-                ORDER BY name;
-                """
-            )
-            tables = cursor.fetchall()
-
-            for name, create_sql in tables:
-                # 總是使用 _reconstruct_table_sql 來確保格式一致
-                structures.append(self._reconstruct_table_sql(cursor, name))
-
-            return structures
-
-        finally:
-            cursor.close()
-            connection.close()
 
     def _reconstruct_table_sql(self, cursor: sqlite3.Cursor, table_name: str) -> str:
         """Reconstruct CREATE TABLE statement from PRAGMA info."""
