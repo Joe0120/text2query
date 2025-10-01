@@ -10,6 +10,7 @@
 - 🔌 **LLM 整合**：使用您自己的 LlamaIndex LLM 實例
 - 🛡️ **安全檢查**：內建查詢安全驗證機制
 - 📊 **結構分析**：自動分析資料庫結構供 LLM 參考
+- 🧠 **RAG 訓練資料管理**：TrainingStore 模組支援向量相似度搜尋和權限控制
 
 ## 使用方式（作為 Git Submodule）
 
@@ -32,6 +33,15 @@ pip install -r libs/text2query/requirements.txt
 
 ```bash
 pip install llama-index llama-index-llms-openai  # 或其他 LLM 套件
+```
+
+如需使用 RAG 訓練資料功能，還需安裝 pgvector：
+
+```bash
+# PostgreSQL 需要安裝 pgvector 擴展
+# Ubuntu/Debian: apt install postgresql-16-pgvector
+# macOS: brew install pgvector
+pip install pgvector
 ```
 
 ## 使用範例
@@ -87,6 +97,128 @@ adapter = MongoDBAdapter(config)
 # 執行查詢（支援字串或字典格式）
 result = await adapter.sql_execution('db.users.find({"age": {"$gt": 18}}).limit(10)')
 print(result)
+```
+
+### RAG 訓練資料管理
+
+TrainingStore 提供完整的 RAG 訓練資料管理功能，支援向量相似度搜尋和靈活的權限控制：
+
+```python
+from text2query.core.connections import PostgreSQLConfig
+from text2query.core.training import TrainingStore
+import uuid
+
+# 1. 初始化 TrainingStore（應用啟動時執行一次）
+store = await TrainingStore.initialize(
+    postgres_config=PostgreSQLConfig(
+        host="localhost",
+        port=5432,
+        database_name="your_db",
+        username="user",
+        password="password",
+    ),
+    training_schema="wisbi",  # 自訂 schema 名稱
+    embedding_dim=768,        # 向量維度
+)
+
+# 2. 新增訓練資料
+training_id = str(uuid.uuid4())
+
+# 新增問答對
+qna_id = await store.insert_qna(
+    training_id=training_id,
+    table_path="mysql.employees",  # 必填：資料表路徑
+    question="如何查詢所有員工？",
+    answer_sql="SELECT * FROM employees",
+    embedding=[0.1, 0.2, ...],    # 768 維向量
+    user_id="alice",              # 可選：使用者 ID
+    group_id="sales",             # 可選：群組 ID
+    metadata={"source": "manual", "type": "basic_query"},
+)
+
+# 新增 SQL 範例
+sql_id = await store.insert_sql_example(
+    training_id=training_id,
+    table_path="mysql.employees",
+    content="SELECT COUNT(*) FROM employees WHERE active = true",
+    embedding=[0.3, 0.4, ...],
+    user_id="alice",
+    group_id="sales",
+    metadata={"type": "count_query"},
+)
+
+# 新增文件說明
+doc_id = await store.insert_documentation(
+    training_id=training_id,
+    table_path="mysql.employees",
+    title="員工表說明",
+    content="employees 表包含所有員工的基本資訊",
+    embedding=[0.5, 0.6, ...],
+    user_id="alice",
+    group_id="sales",
+    metadata={"type": "table_doc"},
+)
+
+# 3. 搜尋訓練資料（向量相似度搜尋 + 權限過濾）
+search_results = await store.search_all(
+    query_embedding=[0.1, 0.2, ...],  # 查詢向量
+    table_path="mysql.employees",
+    user_id="alice",                  # 搜尋者身份
+    group_id="sales",
+    top_k=5,
+)
+
+# 結果格式：{"qna": [...], "sql_examples": [...], "documentation": [...]}
+for table_name, results in search_results.items():
+    print(f"{table_name}: {len(results)} 筆結果")
+
+# 4. 更新訓練資料（Upsert 模式）
+updated_id = await store.upsert_qna_by_training_id(
+    training_id=training_id,
+    table_path="mysql.employees",
+    question="如何查詢在職員工？",  # 更新問題
+    answer_sql="SELECT * FROM employees WHERE active = true",
+    embedding=[0.7, 0.8, ...],
+    user_id="alice",
+    group_id="sales",
+    metadata={"updated": True},
+)
+
+# 5. 刪除訓練資料
+deleted_count = await store.delete_by_training_id("qna", training_id)
+print(f"刪除了 {deleted_count} 筆資料")
+```
+
+#### 權限控制模型
+
+TrainingStore 支援靈活的權限控制：
+
+| user_id | group_id | 存取權限 | 使用情境 |
+|---------|----------|----------|----------|
+| "alice" | "sales" | 只有 alice 在 sales 群組可存取 | 個人私有資料（限定群組） |
+| "alice" | "" | alice 在任何群組都可存取 | 個人跨群組資料 |
+| "" | "sales" | sales 群組所有成員可存取 | 群組共享資料 |
+| "" | "" | 所有人都可存取 | 全局公開資料 |
+
+```python
+# 權限搜尋範例
+# Alice 在 sales 群組搜尋 → 可存取：個人私有 + 個人跨群組 + 群組共享 + 全局公開
+alice_results = await store.search_qna(
+    query_embedding=embedding,
+    table_path="mysql.employees",
+    user_id="alice",
+    group_id="sales",
+    top_k=10,
+)
+
+# 匿名使用者搜尋 → 只能存取：全局公開資料
+public_results = await store.search_qna(
+    query_embedding=embedding,
+    table_path="mysql.employees",
+    user_id=None,
+    group_id=None,
+    top_k=10,
+)
 ```
 
 ### Text-to-SQL 功能
@@ -219,6 +351,40 @@ query2 = await t2s.generate_query("只顯示前 10 個")  # 會參考之前的�
 
 ## API 文件
 
+### TrainingStore
+
+RAG 訓練資料管理類，支援向量相似度搜尋和權限控制。
+
+**初始化：**
+```python
+store = await TrainingStore.initialize(
+    postgres_config=PostgreSQLConfig(...),
+    training_schema="wisbi",
+    embedding_dim=768,
+)
+```
+
+**主要方法：**
+
+**新增資料：**
+- `async insert_qna(training_id, table_path, question, answer_sql, embedding, user_id="", group_id="", metadata=None)`: 新增問答對
+- `async insert_sql_example(training_id, table_path, content, embedding, user_id="", group_id="", metadata=None)`: 新增 SQL 範例
+- `async insert_documentation(training_id, table_path, content, embedding, title=None, user_id="", group_id="", metadata=None)`: 新增文件說明
+
+**搜尋資料：**
+- `async search_qna(query_embedding, table_path, user_id=None, group_id=None, top_k=5)`: 搜尋問答對
+- `async search_sql_examples(query_embedding, table_path, user_id=None, group_id=None, top_k=5)`: 搜尋 SQL 範例
+- `async search_documentation(query_embedding, table_path, user_id=None, group_id=None, top_k=5)`: 搜尋文件說明
+- `async search_all(query_embedding, table_path, user_id=None, group_id=None, top_k=8)`: 搜尋所有類型
+
+**更新資料：**
+- `async upsert_qna_by_training_id(training_id, table_path, question, answer_sql, embedding, user_id="", group_id="", metadata=None)`: 更新問答對
+- `async upsert_sql_example_by_training_id(...)`: 更新 SQL 範例
+- `async upsert_documentation_by_training_id(...)`: 更新文件說明
+
+**刪除資料：**
+- `async delete_by_training_id(table, training_id, user_id=None, group_id=None, table_path=None)`: 刪除訓練資料
+
 ### Text2SQL
 
 主要的 Text-to-SQL 轉換類。
@@ -258,6 +424,10 @@ Text-to-SQL 功能需要：
 - `llama-index` - LLM 整合框架
 - 任何 LlamaIndex 相容的 LLM 套件（如 `llama-index-llms-openai`）
 
+RAG 訓練資料功能需要：
+- `pgvector` - PostgreSQL 向量擴展
+- PostgreSQL 資料庫（需安裝 pgvector 擴展）
+
 ## 安全性
 
 本套件包含多層安全檢查：
@@ -266,6 +436,7 @@ Text-to-SQL 功能需要：
 2. **MongoDB 操作限制**：禁止危險操作（`$where`, `$function`, `dropDatabase` 等）
 3. **查詢限制**：自動添加結果數量限制
 4. **連線驗證**：配置驗證和連線測試
+5. **權限控制**：TrainingStore 提供細粒度的資料存取控制
 
 ## 授權
 
