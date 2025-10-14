@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 import logging
 import json
 
@@ -50,6 +50,7 @@ class TrainingStore:
         postgres_config: PostgreSQLConfig,
         training_schema: str = "wisbi",
         embedding_dim: int = 768,
+        embedder: Optional[Any] = None,
     ):
         """初始化 TrainingStore
         
@@ -60,10 +61,12 @@ class TrainingStore:
             postgres_config: PostgreSQL 連線配置
             training_schema: RAG training 表要存放的 schema 名稱（預設 "wisbi"）
             embedding_dim: Embedding 向量維度（預設 768）
+            embedder: LlamaIndex embedder 實例（可選），用於自動生成 embedding
         """
         self.postgres_config = postgres_config
         self.training_schema = training_schema
         self.embedding_dim = embedding_dim
+        self.embedder = embedder
         self.logger = logging.getLogger(__name__)
         self._adapter: Optional[PostgreSQLAdapter] = None
     
@@ -73,6 +76,7 @@ class TrainingStore:
         postgres_config: PostgreSQLConfig,
         training_schema: str = "wisbi",
         embedding_dim: int = 768,
+        embedder: Optional[Any] = None,
         auto_init_tables: bool = True,
     ) -> "TrainingStore":
         """初始化 TrainingStore 實例並自動設定表
@@ -83,12 +87,15 @@ class TrainingStore:
             postgres_config: PostgreSQL 連線配置
             training_schema: RAG training 表要存放的 schema 名稱（預設 "wisbi"）
             embedding_dim: Embedding 向量維度（預設 768）
+            embedder: LlamaIndex embedder 實例（可選），用於自動生成 embedding
             auto_init_tables: 是否自動檢查並建立表（預設 True）
         
         Returns:
             TrainingStore: 已初始化的實例
         
         Example:
+            >>> from llama_index.embeddings.openai import OpenAIEmbedding
+            >>> embedder = OpenAIEmbedding()
             >>> store = await TrainingStore.initialize(
             ...     postgres_config=PostgreSQLConfig(
             ...         host="localhost",
@@ -99,9 +106,10 @@ class TrainingStore:
             ...     ),
             ...     training_schema="wisbi",
             ...     embedding_dim=768,
+            ...     embedder=embedder,
             ... )
         """
-        store = cls(postgres_config, training_schema, embedding_dim)
+        store = cls(postgres_config, training_schema, embedding_dim, embedder)
         
         if auto_init_tables:
             # 檢查表是否存在
@@ -245,7 +253,192 @@ class TrainingStore:
             return False
     
     # ============================================================================
-    # INSERT 方法 - 新增訓練資料
+    # Embedding 生成輔助方法
+    # ============================================================================
+    
+    async def _generate_embedding(self, text: str) -> List[float]:
+        """生成文本的 embedding 向量
+        
+        Args:
+            text: 要生成 embedding 的文本
+        
+        Returns:
+            List[float]: embedding 向量
+        
+        Raises:
+            RuntimeError: 如果沒有提供 embedder
+        """
+        if self.embedder is None:
+            raise RuntimeError(
+                "Embedder not provided. Please initialize TrainingStore with an embedder "
+                "or use the manual insert methods (insert_qna, insert_sql_example, insert_documentation) "
+                "with pre-computed embeddings."
+            )
+        
+        try:
+            # LlamaIndex embedder 通常有 get_text_embedding 方法
+            if hasattr(self.embedder, 'get_text_embedding'):
+                embedding = await self.embedder.aget_text_embedding(text)
+            elif hasattr(self.embedder, 'aget_text_embedding'):
+                embedding = await self.embedder.aget_text_embedding(text)
+            else:
+                # 嘗試同步方法
+                if hasattr(self.embedder, 'get_text_embedding'):
+                    embedding = self.embedder.get_text_embedding(text)
+                else:
+                    raise AttributeError(
+                        f"Embedder {type(self.embedder)} does not have get_text_embedding method"
+                    )
+            
+            return embedding
+            
+        except Exception as e:
+            self.logger.exception(f"Error generating embedding: {e}")
+            raise
+    
+    # ============================================================================
+    # INSERT 方法 - 新增訓練資料（統一介面）
+    # ============================================================================
+    
+    async def insert_training_item(
+        self,
+        *,
+        type: str,
+        training_id: str,
+        table_path: str,
+        user_id: str = "",
+        group_id: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+        is_active: bool = True,
+        # QnA 特有
+        question: Optional[str] = None,
+        answer_sql: Optional[str] = None,
+        # SQL Example/Documentation 特有
+        content: Optional[str] = None,
+        title: Optional[str] = None,
+    ) -> Optional[int]:
+        """統一的訓練資料插入方法，自動生成 embedding
+        
+        這個方法簡化了訓練資料的插入流程，使用者只需指定 type 和相關欄位，
+        系統會自動生成 embedding 並調用對應的底層方法。
+        
+        注意：使用此方法需要在初始化 TrainingStore 時提供 embedder。
+        
+        Args:
+            type: 資料類型，必須是 "qna", "sql_example", "documentation" 之一
+            training_id: 訓練批次 ID（UUID 字串）
+            table_path: 資料表路徑（必填），例如：'mysql.employees'
+            user_id: 使用者 ID（可選，預設空字串 = 不限使用者）
+            group_id: 群組 ID（可選，預設空字串 = 不限群組）
+            metadata: 額外的 metadata（JSON 格式）
+            is_active: 是否啟用（預設 True）
+            question: 問題文字（type="qna" 時必填）
+            answer_sql: 答案 SQL（type="qna" 時必填）
+            content: 內容（type="sql_example" 或 "documentation" 時必填）
+            title: 標題（type="documentation" 時可選）
+        
+        Returns:
+            Optional[int]: 成功返回插入的 id，失敗返回 None
+        
+        Raises:
+            ValueError: 如果 type 不合法或缺少必要欄位
+            RuntimeError: 如果沒有提供 embedder
+        
+        Example:
+            >>> # 插入問答對
+            >>> await store.insert_training_item(
+            ...     type="qna",
+            ...     training_id="550e8400-e29b-41d4-a716-446655440000",
+            ...     table_path="mysql.employees",
+            ...     question="查詢所有員工",
+            ...     answer_sql="SELECT * FROM employees",
+            ...     user_id="user_123",
+            ...     group_id="group_A",
+            ... )
+            
+            >>> # 插入 SQL 範例
+            >>> await store.insert_training_item(
+            ...     type="sql_example",
+            ...     training_id="550e8400-...",
+            ...     table_path="mysql.employees",
+            ...     content="SELECT COUNT(*) FROM employees WHERE active = true",
+            ... )
+            
+            >>> # 插入文件說明
+            >>> await store.insert_training_item(
+            ...     type="documentation",
+            ...     training_id="550e8400-...",
+            ...     table_path="mysql.employees",
+            ...     title="員工表說明",
+            ...     content="employees 表包含所有員工的基本資訊",
+            ... )
+        """
+        # 驗證 type
+        valid_types = {"qna", "sql_example", "documentation"}
+        if type not in valid_types:
+            raise ValueError(f"Invalid type '{type}'. Must be one of: {valid_types}")
+        
+        # 根據 type 組合文本用於生成 embedding
+        if type == "qna":
+            if not question or not answer_sql:
+                raise ValueError("For type='qna', both 'question' and 'answer_sql' are required")
+            text_for_embedding = f"{question} {answer_sql}"
+        elif type == "sql_example":
+            if not content:
+                raise ValueError("For type='sql_example', 'content' is required")
+            text_for_embedding = content
+        else:  # documentation
+            if not content:
+                raise ValueError("For type='documentation', 'content' is required")
+            title_part = f"{title} " if title else ""
+            text_for_embedding = f"{title_part}{content}"
+        
+        # 生成 embedding
+        try:
+            embedding = await self._generate_embedding(text_for_embedding)
+        except Exception as e:
+            self.logger.error(f"Failed to generate embedding for type={type}: {e}")
+            return None
+        
+        # 根據 type 調用對應的底層插入方法
+        if type == "qna":
+            return await self.insert_qna(
+                training_id=training_id,
+                table_path=table_path,
+                question=question,
+                answer_sql=answer_sql,
+                embedding=embedding,
+                user_id=user_id,
+                group_id=group_id,
+                metadata=metadata,
+                is_active=is_active,
+            )
+        elif type == "sql_example":
+            return await self.insert_sql_example(
+                training_id=training_id,
+                table_path=table_path,
+                content=content,
+                embedding=embedding,
+                user_id=user_id,
+                group_id=group_id,
+                metadata=metadata,
+                is_active=is_active,
+            )
+        else:  # documentation
+            return await self.insert_documentation(
+                training_id=training_id,
+                table_path=table_path,
+                content=content,
+                embedding=embedding,
+                title=title,
+                user_id=user_id,
+                group_id=group_id,
+                metadata=metadata,
+                is_active=is_active,
+            )
+    
+    # ============================================================================
+    # INSERT 方法 - 新增訓練資料（底層方法）
     # ============================================================================
     
     async def insert_qna(
@@ -708,11 +901,35 @@ class TrainingStore:
     # SEARCH 方法 - 向量相似度搜尋
     # ============================================================================
     
+    def _build_table_path_condition(self, table_path: Union[str, List[str]]) -> str:
+        """構建 table_path 的 SQL 條件
+        
+        Args:
+            table_path: 可以是：
+                - 單一字串：'mysql.employees'
+                - 通配符：'mysql.*'
+                - 列表：['mysql.employees', 'mysql.groups']
+        
+        Returns:
+            str: SQL WHERE 條件
+        """
+        if isinstance(table_path, list):
+            # 列表模式：使用 IN
+            paths = "', '".join(table_path)
+            return f"table_path IN ('{paths}')"
+        elif '*' in table_path:
+            # 通配符模式：使用 LIKE
+            pattern = table_path.replace('*', '%')
+            return f"table_path LIKE '{pattern}'"
+        else:
+            # 單一字串：使用 =
+            return f"table_path = '{table_path}'"
+    
     async def search_qna(
         self,
         query_embedding: List[float],
         *,
-        table_path: str,
+        table_path: Union[str, List[str]],
         user_id: Optional[str] = None,
         group_id: Optional[str] = None,
         top_k: int = 5,
@@ -724,7 +941,10 @@ class TrainingStore:
         
         Args:
             query_embedding: 查詢的向量 embedding
-            table_path: 資料表路徑（必填）
+            table_path: 資料表路徑，支援三種格式：
+                - 單一字串：'mysql.employees'
+                - 通配符：'mysql.*'（搜尋所有 mysql 開頭的表）
+                - 列表：['mysql.employees', 'mysql.groups']（搜尋多個指定表）
             user_id: 查詢者的使用者 ID（可選）
             group_id: 查詢者的群組 ID（可選）
             top_k: 返回前 K 筆最相似的結果
@@ -750,12 +970,34 @@ class TrainingStore:
             
             4. 如果都不提供 → 只能存取：
                - 全局公開資料 (user_id="" + group_id="")
+        
+        Example:
+            >>> # 搜尋單一表
+            >>> results = await store.search_qna(
+            ...     query_embedding=embedding,
+            ...     table_path="mysql.employees"
+            ... )
+            
+            >>> # 搜尋所有 mysql 表
+            >>> results = await store.search_qna(
+            ...     query_embedding=embedding,
+            ...     table_path="mysql.*"
+            ... )
+            
+            >>> # 搜尋多個指定表
+            >>> results = await store.search_qna(
+            ...     query_embedding=embedding,
+            ...     table_path=["mysql.employees", "mysql.departments"]
+            ... )
         """
         try:
             adapter = self._get_adapter()
             
             # 將 embedding 轉換為字串格式
             embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
+            
+            # 構建 table_path 條件
+            table_path_condition = self._build_table_path_condition(table_path)
             
             # 構建權限過濾條件
             # 根據提供的 user_id 和 group_id 決定可存取的資料範圍
@@ -801,7 +1043,7 @@ class TrainingStore:
                     created_at, updated_at,
                     (embedding <=> '{embedding_str}'::vector) AS distance
                 FROM {self.training_schema}.qna
-                WHERE table_path = '{table_path}'
+                WHERE {table_path_condition}
                   AND {permission_condition}
                   AND (NOT {only_active} OR is_active = TRUE)
                 ORDER BY distance ASC
@@ -834,7 +1076,7 @@ class TrainingStore:
         self,
         query_embedding: List[float],
         *,
-        table_path: str,
+        table_path: Union[str, List[str]],
         user_id: Optional[str] = None,
         group_id: Optional[str] = None,
         top_k: int = 5,
@@ -842,12 +1084,26 @@ class TrainingStore:
     ) -> List[Dict[str, Any]]:
         """搜尋最相似的 SQL 範例訓練資料
         
+        Args:
+            query_embedding: 查詢的向量 embedding
+            table_path: 資料表路徑，支援三種格式：
+                - 單一字串：'mysql.employees'
+                - 通配符：'mysql.*'
+                - 列表：['mysql.employees', 'mysql.groups']
+            user_id: 查詢者的使用者 ID（可選）
+            group_id: 查詢者的群組 ID（可選）
+            top_k: 返回前 K 筆最相似的結果
+            only_active: 是否只返回啟用的資料
+        
         權限過濾邏輯與 search_qna 相同。
         """
         try:
             adapter = self._get_adapter()
             
             embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
+            
+            # 構建 table_path 條件
+            table_path_condition = self._build_table_path_condition(table_path)
             
             # 構建權限過濾條件（與 search_qna 相同邏輯）
             if user_id and group_id:
@@ -883,7 +1139,7 @@ class TrainingStore:
                     created_at, updated_at,
                     (embedding <=> '{embedding_str}'::vector) AS distance
                 FROM {self.training_schema}.sql_examples
-                WHERE table_path = '{table_path}'
+                WHERE {table_path_condition}
                   AND {permission_condition}
                   AND (NOT {only_active} OR is_active = TRUE)
                 ORDER BY distance ASC
@@ -911,7 +1167,7 @@ class TrainingStore:
         self,
         query_embedding: List[float],
         *,
-        table_path: str,
+        table_path: Union[str, List[str]],
         user_id: Optional[str] = None,
         group_id: Optional[str] = None,
         top_k: int = 5,
@@ -919,12 +1175,26 @@ class TrainingStore:
     ) -> List[Dict[str, Any]]:
         """搜尋最相似的文件說明訓練資料
         
+        Args:
+            query_embedding: 查詢的向量 embedding
+            table_path: 資料表路徑，支援三種格式：
+                - 單一字串：'mysql.employees'
+                - 通配符：'mysql.*'
+                - 列表：['mysql.employees', 'mysql.groups']
+            user_id: 查詢者的使用者 ID（可選）
+            group_id: 查詢者的群組 ID（可選）
+            top_k: 返回前 K 筆最相似的結果
+            only_active: 是否只返回啟用的資料
+        
         權限過濾邏輯與 search_qna 相同。
         """
         try:
             adapter = self._get_adapter()
             
             embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
+            
+            # 構建 table_path 條件
+            table_path_condition = self._build_table_path_condition(table_path)
             
             # 構建權限過濾條件（與 search_qna 相同邏輯）
             if user_id and group_id:
@@ -960,7 +1230,7 @@ class TrainingStore:
                     created_at, updated_at,
                     (embedding <=> '{embedding_str}'::vector) AS distance
                 FROM {self.training_schema}.documentation
-                WHERE table_path = '{table_path}'
+                WHERE {table_path_condition}
                   AND {permission_condition}
                   AND (NOT {only_active} OR is_active = TRUE)
                 ORDER BY distance ASC
@@ -988,7 +1258,7 @@ class TrainingStore:
         self,
         query_embedding: List[float],
         *,
-        table_path: str,
+        table_path: Union[str, List[str]],
         user_id: Optional[str] = None,
         group_id: Optional[str] = None,
         top_k: int = 8,
@@ -999,7 +1269,10 @@ class TrainingStore:
         
         Args:
             query_embedding: 查詢的向量 embedding
-            table_path: 資料表路徑（必填）
+            table_path: 資料表路徑，支援三種格式：
+                - 單一字串：'mysql.employees'
+                - 通配符：'mysql.*'
+                - 列表：['mysql.employees', 'mysql.groups']
             user_id: 查詢者的使用者 ID（可選）
             group_id: 查詢者的群組 ID（可選）
             top_k: 總共返回的結果數量
@@ -1012,6 +1285,14 @@ class TrainingStore:
                 "sql_examples": [...],
                 "documentation": [...]
             }
+        
+        Example:
+            >>> # 搜尋所有 mysql 表的所有類型資料
+            >>> results = await store.search_all(
+            ...     query_embedding=embedding,
+            ...     table_path="mysql.*",
+            ...     top_k=10
+            ... )
         """
         per_k = per_table_k or max(2, top_k // 3)
         
