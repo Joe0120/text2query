@@ -122,12 +122,10 @@ store = await TrainingStore.initialize(
 )
 
 # 2. 新增訓練資料
-training_id = str(uuid.uuid4())
 
 # 新增問答對
 qna_id = await store.insert_qna(
-    training_id=training_id,
-    table_path="mysql.employees",  # 必填：資料表路徑
+    table_id="employees",  # 必填：資料表 ID（字串）
     question="如何查詢所有員工？",
     answer_sql="SELECT * FROM employees",
     embedding=[0.1, 0.2, ...],    # 768 維向量
@@ -138,8 +136,7 @@ qna_id = await store.insert_qna(
 
 # 新增 SQL 範例
 sql_id = await store.insert_sql_example(
-    training_id=training_id,
-    table_path="mysql.employees",
+    table_id="employees",
     content="SELECT COUNT(*) FROM employees WHERE active = true",
     embedding=[0.3, 0.4, ...],
     user_id="alice",
@@ -149,8 +146,7 @@ sql_id = await store.insert_sql_example(
 
 # 新增文件說明
 doc_id = await store.insert_documentation(
-    training_id=training_id,
-    table_path="mysql.employees",
+    table_id="employees",
     title="員工表說明",
     content="employees 表包含所有員工的基本資訊",
     embedding=[0.5, 0.6, ...],
@@ -162,7 +158,7 @@ doc_id = await store.insert_documentation(
 # 3. 搜尋訓練資料（向量相似度搜尋 + 權限過濾）
 search_results = await store.search_all(
     query_embedding=[0.1, 0.2, ...],  # 查詢向量
-    table_path="mysql.employees",
+    table_id="employees",
     user_id="alice",                  # 搜尋者身份
     group_id="sales",
     top_k=5,
@@ -173,20 +169,10 @@ for table_name, results in search_results.items():
     print(f"{table_name}: {len(results)} 筆結果")
 
 # 4. 更新訓練資料（Upsert 模式）
-updated_id = await store.upsert_qna_by_training_id(
-    training_id=training_id,
-    table_path="mysql.employees",
-    question="如何查詢在職員工？",  # 更新問題
-    answer_sql="SELECT * FROM employees WHERE active = true",
-    embedding=[0.7, 0.8, ...],
-    user_id="alice",
-    group_id="sales",
-    metadata={"updated": True},
-)
+"""
 
 # 5. 刪除訓練資料
-deleted_count = await store.delete_by_training_id("qna", training_id)
-print(f"刪除了 {deleted_count} 筆資料")
+"""
 ```
 
 #### 權限控制模型
@@ -205,7 +191,7 @@ TrainingStore 支援靈活的權限控制：
 # Alice 在 sales 群組搜尋 → 可存取：個人私有 + 個人跨群組 + 群組共享 + 全局公開
 alice_results = await store.search_qna(
     query_embedding=embedding,
-    table_path="mysql.employees",
+    table_id="employees",
     user_id="alice",
     group_id="sales",
     top_k=10,
@@ -214,7 +200,7 @@ alice_results = await store.search_qna(
 # 匿名使用者搜尋 → 只能存取：全局公開資料
 public_results = await store.search_qna(
     query_embedding=embedding,
-    table_path="mysql.employees",
+    table_id="employees",
     user_id=None,
     group_id=None,
     top_k=10,
@@ -367,23 +353,21 @@ store = await TrainingStore.initialize(
 **主要方法：**
 
 **新增資料：**
-- `async insert_qna(training_id, table_path, question, answer_sql, embedding, user_id="", group_id="", metadata=None)`: 新增問答對
-- `async insert_sql_example(training_id, table_path, content, embedding, user_id="", group_id="", metadata=None)`: 新增 SQL 範例
-- `async insert_documentation(training_id, table_path, content, embedding, title=None, user_id="", group_id="", metadata=None)`: 新增文件說明
+- `async insert_qna(table_id, question, answer_sql, embedding, user_id="", group_id="", metadata=None)`: 新增問答對
+- `async insert_sql_example(table_id, content, embedding, user_id="", group_id="", metadata=None)`: 新增 SQL 範例
+- `async insert_documentation(table_id, content, embedding, title=None, user_id="", group_id="", metadata=None)`: 新增文件說明
 
 **搜尋資料：**
-- `async search_qna(query_embedding, table_path, user_id=None, group_id=None, top_k=5)`: 搜尋問答對
-- `async search_sql_examples(query_embedding, table_path, user_id=None, group_id=None, top_k=5)`: 搜尋 SQL 範例
-- `async search_documentation(query_embedding, table_path, user_id=None, group_id=None, top_k=5)`: 搜尋文件說明
-- `async search_all(query_embedding, table_path, user_id=None, group_id=None, top_k=8)`: 搜尋所有類型
+- `async search_qna(query_embedding, table_id, user_id=None, group_id=None, top_k=5)`: 搜尋問答對
+- `async search_sql_examples(query_embedding, table_id, user_id=None, group_id=None, top_k=5)`: 搜尋 SQL 範例
+- `async search_documentation(query_embedding, table_id, user_id=None, group_id=None, top_k=5)`: 搜尋文件說明
+- `async search_all(query_embedding, table_id, user_id=None, group_id=None, top_k=8)`: 搜尋所有類型
 
 **更新資料：**
-- `async upsert_qna_by_training_id(training_id, table_path, question, answer_sql, embedding, user_id="", group_id="", metadata=None)`: 更新問答對
-- `async upsert_sql_example_by_training_id(...)`: 更新 SQL 範例
-- `async upsert_documentation_by_training_id(...)`: 更新文件說明
+（已移除 training_id 相關 upsert 介面）
 
 **刪除資料：**
-- `async delete_by_training_id(table, training_id, user_id=None, group_id=None, table_path=None)`: 刪除訓練資料
+（已移除 training_id 相關刪除介面）
 
 ### Text2SQL
 
