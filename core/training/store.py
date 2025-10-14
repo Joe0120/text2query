@@ -18,7 +18,7 @@ class TrainingStore:
     包括問答對 (QnA)、SQL 範例 (sql_examples) 和文件說明 (documentation)。
     
     權限模型：
-        - table_path: 必填，指定資料表路徑（例如：mysql.employees）
+        - table_id: 必填，指定資料表 ID（字串）
         - user_id: 可選，空字串 = 不限使用者
         - group_id: 可選，空字串 = 不限群組
         
@@ -304,8 +304,7 @@ class TrainingStore:
         self,
         *,
         type: str,
-        training_id: str,
-        table_path: str,
+        table_id: str,
         user_id: str = "",
         group_id: str = "",
         metadata: Optional[Dict[str, Any]] = None,
@@ -326,8 +325,7 @@ class TrainingStore:
         
         Args:
             type: 資料類型，必須是 "qna", "sql_example", "documentation" 之一
-            training_id: 訓練批次 ID（UUID 字串）
-            table_path: 資料表路徑（必填），例如：'mysql.employees'
+            table_id: 資料表 ID（必填，字串）
             user_id: 使用者 ID（可選，預設空字串 = 不限使用者）
             group_id: 群組 ID（可選，預設空字串 = 不限群組）
             metadata: 額外的 metadata（JSON 格式）
@@ -348,10 +346,9 @@ class TrainingStore:
             >>> # 插入問答對
             >>> await store.insert_training_item(
             ...     type="qna",
-            ...     training_id="550e8400-e29b-41d4-a716-446655440000",
-            ...     table_path="mysql.employees",
+            ...     table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",
             ...     question="查詢所有員工",
-            ...     answer_sql="SELECT * FROM employees",
+            ...     answer_sql='SELECT * FROM "b2c5bce1-b684-4700-b3be-a9db93d71a2a"',
             ...     user_id="user_123",
             ...     group_id="group_A",
             ... )
@@ -359,18 +356,16 @@ class TrainingStore:
             >>> # 插入 SQL 範例
             >>> await store.insert_training_item(
             ...     type="sql_example",
-            ...     training_id="550e8400-...",
-            ...     table_path="mysql.employees",
-            ...     content="SELECT COUNT(*) FROM employees WHERE active = true",
+            ...     table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",
+            ...     content='SELECT COUNT(*) FROM "b2c5bce1-b684-4700-b3be-a9db93d71a2a" WHERE hire_date IS NOT NULL',
             ... )
             
             >>> # 插入文件說明
             >>> await store.insert_training_item(
             ...     type="documentation",
-            ...     training_id="550e8400-...",
-            ...     table_path="mysql.employees",
+            ...     table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",
             ...     title="員工表說明",
-            ...     content="employees 表包含所有員工的基本資訊",
+            ...     content="員工基本資料表，包含姓名、部門等資訊",
             ... )
         """
         # 驗證 type
@@ -403,8 +398,7 @@ class TrainingStore:
         # 根據 type 調用對應的底層插入方法
         if type == "qna":
             return await self.insert_qna(
-                training_id=training_id,
-                table_path=table_path,
+                table_id=table_id,
                 question=question,
                 answer_sql=answer_sql,
                 embedding=embedding,
@@ -415,8 +409,7 @@ class TrainingStore:
             )
         elif type == "sql_example":
             return await self.insert_sql_example(
-                training_id=training_id,
-                table_path=table_path,
+                table_id=table_id,
                 content=content,
                 embedding=embedding,
                 user_id=user_id,
@@ -426,8 +419,7 @@ class TrainingStore:
             )
         else:  # documentation
             return await self.insert_documentation(
-                training_id=training_id,
-                table_path=table_path,
+                table_id=table_id,
                 content=content,
                 embedding=embedding,
                 title=title,
@@ -444,8 +436,7 @@ class TrainingStore:
     async def insert_qna(
         self,
         *,
-        training_id: str,
-        table_path: str,
+        table_id: str,
         question: str,
         answer_sql: str,
         embedding: List[float],
@@ -457,8 +448,7 @@ class TrainingStore:
         """插入問答對訓練資料
         
         Args:
-            training_id: 訓練批次 ID（UUID 字串）
-            table_path: 資料表路徑（必填），例如：'mysql.employees'
+            table_id: 資料表 ID（必填，字串）
             question: 問題文字
             answer_sql: 答案 SQL
             embedding: 向量 embedding（長度需符合 embedding_dim）
@@ -479,10 +469,9 @@ class TrainingStore:
         Example:
             >>> # 插入個人私有資料
             >>> id = await store.insert_qna(
-            ...     training_id="550e8400-e29b-41d4-a716-446655440000",
-            ...     table_path="mysql.employees",
+            ...     table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",
             ...     question="查詢所有員工",
-            ...     answer_sql="SELECT * FROM employees",
+            ...     answer_sql='SELECT * FROM "b2c5bce1-b684-4700-b3be-a9db93d71a2a"',
             ...     embedding=[0.1, 0.2, ...],  # 768 維向量
             ...     user_id="user_123",
             ...     group_id="group_A",
@@ -493,7 +482,6 @@ class TrainingStore:
             
             # 準備 metadata（確保是 JSON 格式）
             md = metadata or {}
-            md.setdefault("training_id", training_id)
             metadata_json = json.dumps(md, ensure_ascii=False)
             
             # 將 embedding 轉換為字串格式
@@ -503,10 +491,10 @@ class TrainingStore:
             # 注意：使用 $$ 符號包圍文字以避免 SQL injection
             insert_sql = f"""
                 INSERT INTO {self.training_schema}.qna (
-                    user_id, group_id, table_path, training_id,
+                    user_id, group_id, table_id,
                     question, answer_sql, embedding, metadata, is_active
                 ) VALUES (
-                    '{user_id}', '{group_id}', '{table_path}', '{training_id}'::uuid,
+                    '{user_id}', '{group_id}', '{table_id}',
                     $${question}$$, $${answer_sql}$$, '{embedding_str}'::vector, '{metadata_json}'::jsonb, {is_active}
                 )
                 RETURNING id
@@ -516,7 +504,7 @@ class TrainingStore:
             
             if result.get("success") and result.get("result"):
                 inserted_id = result["result"][0][0]
-                self.logger.info(f"Inserted QnA: id={inserted_id}, table_path={table_path}, training_id={training_id}")
+                self.logger.info(f"Inserted QnA: id={inserted_id}, table_id={table_id}")
                 return int(inserted_id)
             else:
                 error_msg = result.get("error", "Unknown error")
@@ -530,8 +518,7 @@ class TrainingStore:
     async def insert_sql_example(
         self,
         *,
-        training_id: str,
-        table_path: str,
+        table_id: str,
         content: str,
         embedding: List[float],
         user_id: str = "",
@@ -542,8 +529,7 @@ class TrainingStore:
         """插入 SQL 範例訓練資料
         
         Args:
-            training_id: 訓練批次 ID（UUID 字串）
-            table_path: 資料表路徑（必填）
+            table_id: 資料表 ID（必填，字串）
             content: SQL 範例內容
             embedding: 向量 embedding
             user_id: 使用者 ID（可選）
@@ -558,16 +544,15 @@ class TrainingStore:
             adapter = self._get_adapter()
             
             md = metadata or {}
-            md.setdefault("training_id", training_id)
             metadata_json = json.dumps(md, ensure_ascii=False)
             embedding_str = '[' + ','.join(map(str, embedding)) + ']'
             
             insert_sql = f"""
                 INSERT INTO {self.training_schema}.sql_examples (
-                    user_id, group_id, table_path, training_id,
+                    user_id, group_id, table_id,
                     content, embedding, metadata, is_active
                 ) VALUES (
-                    '{user_id}', '{group_id}', '{table_path}', '{training_id}'::uuid,
+                    '{user_id}', '{group_id}', '{table_id}',
                     $${content}$$, '{embedding_str}'::vector, '{metadata_json}'::jsonb, {is_active}
                 )
                 RETURNING id
@@ -577,7 +562,7 @@ class TrainingStore:
             
             if result.get("success") and result.get("result"):
                 inserted_id = result["result"][0][0]
-                self.logger.info(f"Inserted SQL example: id={inserted_id}, table_path={table_path}, training_id={training_id}")
+                self.logger.info(f"Inserted SQL example: id={inserted_id}, table_id={table_id}")
                 return int(inserted_id)
             else:
                 error_msg = result.get("error", "Unknown error")
@@ -591,8 +576,7 @@ class TrainingStore:
     async def insert_documentation(
         self,
         *,
-        training_id: str,
-        table_path: str,
+        table_id: str,
         content: str,
         embedding: List[float],
         title: Optional[str] = None,
@@ -604,8 +588,7 @@ class TrainingStore:
         """插入文件說明訓練資料
         
         Args:
-            training_id: 訓練批次 ID（UUID 字串）
-            table_path: 資料表路徑（必填）
+            table_id: 資料表 ID（必填，字串）
             content: 文件內容
             embedding: 向量 embedding
             title: 文件標題（可選）
@@ -621,7 +604,6 @@ class TrainingStore:
             adapter = self._get_adapter()
             
             md = metadata or {}
-            md.setdefault("training_id", training_id)
             metadata_json = json.dumps(md, ensure_ascii=False)
             embedding_str = '[' + ','.join(map(str, embedding)) + ']'
             
@@ -630,10 +612,10 @@ class TrainingStore:
             
             insert_sql = f"""
                 INSERT INTO {self.training_schema}.documentation (
-                    user_id, group_id, table_path, training_id,
+                    user_id, group_id, table_id,
                     title, content, embedding, metadata, is_active
                 ) VALUES (
-                    '{user_id}', '{group_id}', '{table_path}', '{training_id}'::uuid,
+                    '{user_id}', '{group_id}', '{table_id}',
                     {title_sql}, $${content}$$, '{embedding_str}'::vector, '{metadata_json}'::jsonb, {is_active}
                 )
                 RETURNING id
@@ -643,7 +625,7 @@ class TrainingStore:
             
             if result.get("success") and result.get("result"):
                 inserted_id = result["result"][0][0]
-                self.logger.info(f"Inserted documentation: id={inserted_id}, table_path={table_path}, training_id={training_id}")
+                self.logger.info(f"Inserted documentation: id={inserted_id}, table_id={table_id}")
                 return int(inserted_id)
             else:
                 error_msg = result.get("error", "Unknown error")
@@ -655,281 +637,22 @@ class TrainingStore:
             return None
     
     # ============================================================================
-    # UPDATE 方法 - 更新訓練資料（Upsert 模式：先刪除再插入）
-    # ============================================================================
-    
-    async def upsert_qna_by_training_id(
-        self,
-        *,
-        training_id: str,
-        table_path: str,
-        question: str,
-        answer_sql: str,
-        embedding: List[float],
-        user_id: str = "",
-        group_id: str = "",
-        metadata: Optional[Dict[str, Any]] = None,
-        is_active: bool = True,
-    ) -> Optional[int]:
-        """更新問答對訓練資料（先刪除舊的，再插入新的）
-        
-        這個方法會先根據 training_id + table_path + user_id + group_id 刪除舊資料，
-        然後插入新資料。適用於更新同一批次的訓練資料。
-        
-        Args:
-            training_id: 訓練批次 ID（UUID 字串）
-            table_path: 資料表路徑（必填）
-            question: 問題文字
-            answer_sql: 答案 SQL
-            embedding: 向量 embedding
-            user_id: 使用者 ID（可選）
-            group_id: 群組 ID（可選）
-            metadata: 額外的 metadata
-            is_active: 是否啟用
-        
-        Returns:
-            Optional[int]: 成功返回插入的新 id，失敗返回 None
-        """
-        try:
-            adapter = self._get_adapter()
-            
-            # 先刪除舊的資料
-            delete_sql = f"""
-                DELETE FROM {self.training_schema}.qna
-                WHERE training_id = '{training_id}'::uuid
-                  AND table_path = '{table_path}'
-                  AND user_id = '{user_id}'
-                  AND group_id = '{group_id}'
-            """
-            
-            delete_result = await adapter.sql_execution(delete_sql, safe=False, limit=None)
-            
-            if delete_result.get("success"):
-                deleted_count = delete_result.get("metadata", {}).get("rows_affected", 0)
-                if deleted_count > 0:
-                    self.logger.info(f"Deleted {deleted_count} old QnA records for training_id={training_id}")
-            
-            # 再插入新的資料
-            return await self.insert_qna(
-                training_id=training_id,
-                table_path=table_path,
-                question=question,
-                answer_sql=answer_sql,
-                embedding=embedding,
-                user_id=user_id,
-                group_id=group_id,
-                metadata=metadata,
-                is_active=is_active,
-            )
-                
-        except Exception as e:
-            self.logger.exception(f"Error upserting QnA: {e}")
-            return None
-    
-    async def upsert_sql_example_by_training_id(
-        self,
-        *,
-        training_id: str,
-        table_path: str,
-        content: str,
-        embedding: List[float],
-        user_id: str = "",
-        group_id: str = "",
-        metadata: Optional[Dict[str, Any]] = None,
-        is_active: bool = True,
-    ) -> Optional[int]:
-        """更新 SQL 範例訓練資料（先刪除舊的，再插入新的）"""
-        try:
-            adapter = self._get_adapter()
-            
-            delete_sql = f"""
-                DELETE FROM {self.training_schema}.sql_examples
-                WHERE training_id = '{training_id}'::uuid
-                  AND table_path = '{table_path}'
-                  AND user_id = '{user_id}'
-                  AND group_id = '{group_id}'
-            """
-            
-            delete_result = await adapter.sql_execution(delete_sql, safe=False, limit=None)
-            
-            if delete_result.get("success"):
-                deleted_count = delete_result.get("metadata", {}).get("rows_affected", 0)
-                if deleted_count > 0:
-                    self.logger.info(f"Deleted {deleted_count} old SQL examples for training_id={training_id}")
-            
-            return await self.insert_sql_example(
-                training_id=training_id,
-                table_path=table_path,
-                content=content,
-                embedding=embedding,
-                user_id=user_id,
-                group_id=group_id,
-                metadata=metadata,
-                is_active=is_active,
-            )
-                
-        except Exception as e:
-            self.logger.exception(f"Error upserting SQL example: {e}")
-            return None
-    
-    async def upsert_documentation_by_training_id(
-        self,
-        *,
-        training_id: str,
-        table_path: str,
-        content: str,
-        embedding: List[float],
-        title: Optional[str] = None,
-        user_id: str = "",
-        group_id: str = "",
-        metadata: Optional[Dict[str, Any]] = None,
-        is_active: bool = True,
-    ) -> Optional[int]:
-        """更新文件說明訓練資料（先刪除舊的，再插入新的）"""
-        try:
-            adapter = self._get_adapter()
-            
-            delete_sql = f"""
-                DELETE FROM {self.training_schema}.documentation
-                WHERE training_id = '{training_id}'::uuid
-                  AND table_path = '{table_path}'
-                  AND user_id = '{user_id}'
-                  AND group_id = '{group_id}'
-            """
-            
-            delete_result = await adapter.sql_execution(delete_sql, safe=False, limit=None)
-            
-            if delete_result.get("success"):
-                deleted_count = delete_result.get("metadata", {}).get("rows_affected", 0)
-                if deleted_count > 0:
-                    self.logger.info(f"Deleted {deleted_count} old documentation for training_id={training_id}")
-            
-            return await self.insert_documentation(
-                training_id=training_id,
-                table_path=table_path,
-                content=content,
-                embedding=embedding,
-                title=title,
-                user_id=user_id,
-                group_id=group_id,
-                metadata=metadata,
-                is_active=is_active,
-            )
-                
-        except Exception as e:
-            self.logger.exception(f"Error upserting documentation: {e}")
-            return None
-    
-    # ============================================================================
-    # DELETE 方法 - 刪除訓練資料
-    # ============================================================================
-    
-    async def delete_by_training_id(
-        self,
-        table: str,
-        training_id: str,
-        *,
-        user_id: Optional[str] = None,
-        group_id: Optional[str] = None,
-        table_path: Optional[str] = None,
-    ) -> int:
-        """根據 training_id 刪除訓練資料
-        
-        可選擇性地加上 user_id, group_id, table_path 作為額外的過濾條件。
-        
-        Args:
-            table: 表名（"qna", "sql_examples", "documentation"）
-            training_id: 訓練批次 ID
-            user_id: 可選的使用者 ID 過濾
-            group_id: 可選的群組 ID 過濾
-            table_path: 可選的資料表路徑過濾
-        
-        Returns:
-            int: 刪除的行數
-        
-        Example:
-            >>> # 刪除特定 training_id 的所有資料
-            >>> deleted = await store.delete_by_training_id("qna", "550e8400-...")
-            
-            >>> # 刪除特定 training_id + user_id 的資料
-            >>> deleted = await store.delete_by_training_id(
-            ...     "qna", "550e8400-...", user_id="user_123"
-            ... )
-        """
-        if table not in {"qna", "sql_examples", "documentation"}:
-            self.logger.error(f"Invalid table name: {table}")
-            return 0
-        
-        try:
-            adapter = self._get_adapter()
-            
-            # 構建 WHERE 條件
-            where_conditions = [f"training_id = '{training_id}'::uuid"]
-            
-            if user_id is not None:
-                where_conditions.append(f"user_id = '{user_id}'")
-            
-            if group_id is not None:
-                where_conditions.append(f"group_id = '{group_id}'")
-            
-            if table_path is not None:
-                where_conditions.append(f"table_path = '{table_path}'")
-            
-            where_clause = " AND ".join(where_conditions)
-            
-            delete_sql = f"""
-                DELETE FROM {self.training_schema}.{table}
-                WHERE {where_clause}
-            """
-            
-            result = await adapter.sql_execution(delete_sql, safe=False, limit=None)
-            
-            if result.get("success"):
-                deleted_count = result.get("metadata", {}).get("rows_affected", 0)
-                self.logger.info(f"Deleted {deleted_count} records from {table} with training_id={training_id}")
-                return deleted_count
-            else:
-                error_msg = result.get("error", "Unknown error")
-                self.logger.error(f"Failed to delete from {table}: {error_msg}")
-                return 0
-                
-        except Exception as e:
-            self.logger.exception(f"Error deleting from {table}: {e}")
-            return 0
-    
-    # ============================================================================
     # SEARCH 方法 - 向量相似度搜尋
     # ============================================================================
     
-    def _build_table_path_condition(self, table_path: Union[str, List[str]]) -> str:
-        """構建 table_path 的 SQL 條件
-        
-        Args:
-            table_path: 可以是：
-                - 單一字串：'mysql.employees'
-                - 通配符：'mysql.*'
-                - 列表：['mysql.employees', 'mysql.groups']
-        
-        Returns:
-            str: SQL WHERE 條件
-        """
-        if isinstance(table_path, list):
-            # 列表模式：使用 IN
-            paths = "', '".join(table_path)
-            return f"table_path IN ('{paths}')"
-        elif '*' in table_path:
-            # 通配符模式：使用 LIKE
-            pattern = table_path.replace('*', '%')
-            return f"table_path LIKE '{pattern}'"
+    def _build_table_id_condition(self, table_id: Union[str, List[str]]) -> str:
+        """構建 table_id 的 SQL 條件（支援單一或列表）"""
+        if isinstance(table_id, list):
+            ids = "', '".join(table_id)
+            return f"table_id IN ('{ids}')"
         else:
-            # 單一字串：使用 =
-            return f"table_path = '{table_path}'"
+            return f"table_id = '{table_id}'"
     
     async def search_qna(
         self,
         query_embedding: List[float],
         *,
-        table_path: Union[str, List[str]],
+        table_id: Union[str, List[str]],
         user_id: Optional[str] = None,
         group_id: Optional[str] = None,
         top_k: int = 5,
@@ -941,10 +664,7 @@ class TrainingStore:
         
         Args:
             query_embedding: 查詢的向量 embedding
-            table_path: 資料表路徑，支援三種格式：
-                - 單一字串：'mysql.employees'
-                - 通配符：'mysql.*'（搜尋所有 mysql 開頭的表）
-                - 列表：['mysql.employees', 'mysql.groups']（搜尋多個指定表）
+            table_id: 資料表 ID（單一字串或字串列表）
             user_id: 查詢者的使用者 ID（可選）
             group_id: 查詢者的群組 ID（可選）
             top_k: 返回前 K 筆最相似的結果
@@ -975,19 +695,13 @@ class TrainingStore:
             >>> # 搜尋單一表
             >>> results = await store.search_qna(
             ...     query_embedding=embedding,
-            ...     table_path="mysql.employees"
-            ... )
-            
-            >>> # 搜尋所有 mysql 表
-            >>> results = await store.search_qna(
-            ...     query_embedding=embedding,
-            ...     table_path="mysql.*"
+            ...     table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a"
             ... )
             
             >>> # 搜尋多個指定表
             >>> results = await store.search_qna(
             ...     query_embedding=embedding,
-            ...     table_path=["mysql.employees", "mysql.departments"]
+            ...     table_id=["b2c5bce1-b684-4700-b3be-a9db93d71a2a", "f8a97f74-e446-494a-8417-b4fdefbd51c5"]
             ... )
         """
         try:
@@ -996,8 +710,8 @@ class TrainingStore:
             # 將 embedding 轉換為字串格式
             embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
             
-            # 構建 table_path 條件
-            table_path_condition = self._build_table_path_condition(table_path)
+            # 構建 table_id 條件
+            table_id_condition = self._build_table_id_condition(table_id)
             
             # 構建權限過濾條件
             # 根據提供的 user_id 和 group_id 決定可存取的資料範圍
@@ -1038,12 +752,12 @@ class TrainingStore:
             # 構建完整的 SELECT 查詢
             select_sql = f"""
                 SELECT 
-                    id, user_id, group_id, table_path, training_id,
+                    id, user_id, group_id, table_id,
                     question, answer_sql, metadata, is_active,
                     created_at, updated_at,
                     (embedding <=> '{embedding_str}'::vector) AS distance
                 FROM {self.training_schema}.qna
-                WHERE {table_path_condition}
+                WHERE {table_id_condition}
                   AND {permission_condition}
                   AND (NOT {only_active} OR is_active = TRUE)
                 ORDER BY distance ASC
@@ -1061,7 +775,7 @@ class TrainingStore:
                 for row in rows:
                     results.append(dict(zip(columns, row)))
                 
-                self.logger.info(f"Found {len(results)} QnA results for table_path={table_path}")
+                self.logger.info(f"Found {len(results)} QnA results for table_id={table_id}")
                 return results
             else:
                 error_msg = result.get("error", "Unknown error")
@@ -1076,7 +790,7 @@ class TrainingStore:
         self,
         query_embedding: List[float],
         *,
-        table_path: Union[str, List[str]],
+        table_id: Union[str, List[str]],
         user_id: Optional[str] = None,
         group_id: Optional[str] = None,
         top_k: int = 5,
@@ -1086,10 +800,7 @@ class TrainingStore:
         
         Args:
             query_embedding: 查詢的向量 embedding
-            table_path: 資料表路徑，支援三種格式：
-                - 單一字串：'mysql.employees'
-                - 通配符：'mysql.*'
-                - 列表：['mysql.employees', 'mysql.groups']
+            table_id: 資料表 ID（單一字串或字串列表）
             user_id: 查詢者的使用者 ID（可選）
             group_id: 查詢者的群組 ID（可選）
             top_k: 返回前 K 筆最相似的結果
@@ -1102,8 +813,8 @@ class TrainingStore:
             
             embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
             
-            # 構建 table_path 條件
-            table_path_condition = self._build_table_path_condition(table_path)
+            # 構建 table_id 條件
+            table_id_condition = self._build_table_id_condition(table_id)
             
             # 構建權限過濾條件（與 search_qna 相同邏輯）
             if user_id and group_id:
@@ -1134,12 +845,12 @@ class TrainingStore:
             
             select_sql = f"""
                 SELECT 
-                    id, user_id, group_id, table_path, training_id,
+                    id, user_id, group_id, table_id,
                     content, metadata, is_active,
                     created_at, updated_at,
                     (embedding <=> '{embedding_str}'::vector) AS distance
                 FROM {self.training_schema}.sql_examples
-                WHERE {table_path_condition}
+                WHERE {table_id_condition}
                   AND {permission_condition}
                   AND (NOT {only_active} OR is_active = TRUE)
                 ORDER BY distance ASC
@@ -1152,7 +863,7 @@ class TrainingStore:
                 columns = result.get("columns", [])
                 rows = result.get("result", [])
                 results = [dict(zip(columns, row)) for row in rows]
-                self.logger.info(f"Found {len(results)} SQL example results for table_path={table_path}")
+                self.logger.info(f"Found {len(results)} SQL example results for table_id={table_id}")
                 return results
             else:
                 error_msg = result.get("error", "Unknown error")
@@ -1167,7 +878,7 @@ class TrainingStore:
         self,
         query_embedding: List[float],
         *,
-        table_path: Union[str, List[str]],
+        table_id: Union[str, List[str]],
         user_id: Optional[str] = None,
         group_id: Optional[str] = None,
         top_k: int = 5,
@@ -1177,10 +888,7 @@ class TrainingStore:
         
         Args:
             query_embedding: 查詢的向量 embedding
-            table_path: 資料表路徑，支援三種格式：
-                - 單一字串：'mysql.employees'
-                - 通配符：'mysql.*'
-                - 列表：['mysql.employees', 'mysql.groups']
+            table_id: 資料表 ID（單一字串或字串列表）
             user_id: 查詢者的使用者 ID（可選）
             group_id: 查詢者的群組 ID（可選）
             top_k: 返回前 K 筆最相似的結果
@@ -1193,8 +901,8 @@ class TrainingStore:
             
             embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
             
-            # 構建 table_path 條件
-            table_path_condition = self._build_table_path_condition(table_path)
+            # 構建 table_id 條件
+            table_id_condition = self._build_table_id_condition(table_id)
             
             # 構建權限過濾條件（與 search_qna 相同邏輯）
             if user_id and group_id:
@@ -1225,12 +933,12 @@ class TrainingStore:
             
             select_sql = f"""
                 SELECT 
-                    id, user_id, group_id, table_path, training_id,
+                    id, user_id, group_id, table_id,
                     title, content, metadata, is_active,
                     created_at, updated_at,
                     (embedding <=> '{embedding_str}'::vector) AS distance
                 FROM {self.training_schema}.documentation
-                WHERE {table_path_condition}
+                WHERE {table_id_condition}
                   AND {permission_condition}
                   AND (NOT {only_active} OR is_active = TRUE)
                 ORDER BY distance ASC
@@ -1243,7 +951,7 @@ class TrainingStore:
                 columns = result.get("columns", [])
                 rows = result.get("result", [])
                 results = [dict(zip(columns, row)) for row in rows]
-                self.logger.info(f"Found {len(results)} documentation results for table_path={table_path}")
+                self.logger.info(f"Found {len(results)} documentation results for table_id={table_id}")
                 return results
             else:
                 error_msg = result.get("error", "Unknown error")
@@ -1258,7 +966,7 @@ class TrainingStore:
         self,
         query_embedding: List[float],
         *,
-        table_path: Union[str, List[str]],
+        table_id: Union[str, List[str]],
         user_id: Optional[str] = None,
         group_id: Optional[str] = None,
         top_k: int = 8,
@@ -1269,10 +977,7 @@ class TrainingStore:
         
         Args:
             query_embedding: 查詢的向量 embedding
-            table_path: 資料表路徑，支援三種格式：
-                - 單一字串：'mysql.employees'
-                - 通配符：'mysql.*'
-                - 列表：['mysql.employees', 'mysql.groups']
+            table_id: 資料表 ID（單一字串或字串列表）
             user_id: 查詢者的使用者 ID（可選）
             group_id: 查詢者的群組 ID（可選）
             top_k: 總共返回的結果數量
@@ -1287,10 +992,10 @@ class TrainingStore:
             }
         
         Example:
-            >>> # 搜尋所有 mysql 表的所有類型資料
+            >>> # 搜尋指定表的所有類型資料
             >>> results = await store.search_all(
             ...     query_embedding=embedding,
-            ...     table_path="mysql.*",
+            ...     table_id=["b2c5bce1-b684-4700-b3be-a9db93d71a2a", "f8a97f74-e446-494a-8417-b4fdefbd51c5"],
             ...     top_k=10
             ... )
         """
@@ -1299,7 +1004,7 @@ class TrainingStore:
         # 並行搜尋所有 3 個表
         qna_results = await self.search_qna(
             query_embedding,
-            table_path=table_path,
+            table_id=table_id,
             user_id=user_id,
             group_id=group_id,
             top_k=per_k,
@@ -1308,7 +1013,7 @@ class TrainingStore:
         
         sql_results = await self.search_sql_examples(
             query_embedding,
-            table_path=table_path,
+            table_id=table_id,
             user_id=user_id,
             group_id=group_id,
             top_k=per_k,
@@ -1317,7 +1022,7 @@ class TrainingStore:
         
         doc_results = await self.search_documentation(
             query_embedding,
-            table_path=table_path,
+            table_id=table_id,
             user_id=user_id,
             group_id=group_id,
             top_k=per_k,

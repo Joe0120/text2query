@@ -26,8 +26,7 @@ def get_training_ddl(schema_name: str = "wisbi", embedding_dim: int = 768) -> Li
             id bigserial PRIMARY KEY,
             user_id text NOT NULL,
             group_id text NOT NULL,
-            table_path text NOT NULL,
-            training_id uuid NOT NULL,
+            table_id text NOT NULL,
             question text NOT NULL,
             answer_sql text NOT NULL,
             embedding vector({embedding_dim}) NOT NULL,
@@ -44,8 +43,7 @@ def get_training_ddl(schema_name: str = "wisbi", embedding_dim: int = 768) -> Li
             id bigserial PRIMARY KEY,
             user_id text NOT NULL,
             group_id text NOT NULL,
-            table_path text NOT NULL,
-            training_id uuid NOT NULL,
+            table_id text NOT NULL,
             content text NOT NULL,
             embedding vector({embedding_dim}) NOT NULL,
             metadata jsonb NOT NULL DEFAULT '{{}}'::jsonb,
@@ -61,8 +59,7 @@ def get_training_ddl(schema_name: str = "wisbi", embedding_dim: int = 768) -> Li
             id bigserial PRIMARY KEY,
             user_id text NOT NULL,
             group_id text NOT NULL,
-            table_path text NOT NULL,
-            training_id uuid NOT NULL,
+            table_id text NOT NULL,
             title text,
             content text NOT NULL,
             embedding vector({embedding_dim}) NOT NULL,
@@ -83,9 +80,5 @@ def get_training_ddl(schema_name: str = "wisbi", embedding_dim: int = 768) -> Li
         f"CREATE INDEX IF NOT EXISTS sql_examples_user_group_idx ON {schema_name}.sql_examples (user_id, group_id, is_active)",
         f"CREATE INDEX IF NOT EXISTS documentation_user_group_idx ON {schema_name}.documentation (user_id, group_id, is_active)",
         
-        # 創建 training_id 索引以加速按 training_id 的查詢和刪除
-        f"CREATE INDEX IF NOT EXISTS qna_training_id_idx ON {schema_name}.qna (training_id)",
-        f"CREATE INDEX IF NOT EXISTS sql_examples_training_id_idx ON {schema_name}.sql_examples (training_id)",
-        f"CREATE INDEX IF NOT EXISTS documentation_training_id_idx ON {schema_name}.documentation (training_id)",
     ]
 
