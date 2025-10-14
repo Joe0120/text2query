@@ -106,9 +106,17 @@ TrainingStore 提供完整的 RAG 訓練資料管理功能，支援向量相似�
 ```python
 from text2query.core.connections import PostgreSQLConfig
 from text2query.core.training import TrainingStore
+from llama_index.embeddings.openai import OpenAIEmbedding  # 或其他 embedder
 import uuid
 
-# 1. 初始化 TrainingStore（應用啟動時執行一次）
+# 1. 初始化 TrainingStore 和 Embedder（應用啟動時執行一次）
+# 創建 embedder（支援任何 LlamaIndex 相容的 embedder）
+embedder = OpenAIEmbedding(
+    model="text-embedding-3-small",
+    dimensions=768,
+)
+
+# 初始化 TrainingStore 並傳入 embedder
 store = await TrainingStore.initialize(
     postgres_config=PostgreSQLConfig(
         host="localhost",
@@ -119,6 +127,7 @@ store = await TrainingStore.initialize(
     ),
     training_schema="wisbi",  # 自訂 schema 名稱
     embedding_dim=768,        # 向量維度
+    embedder=embedder,        # 傳入 embedder，自動生成 embedding
 )
 
 # 2. 新增訓練資料
@@ -128,9 +137,8 @@ qna_id = await store.insert_qna(
     table_id="employees",  # 必填：資料表 ID（字串）
     question="如何查詢所有員工？",
     answer_sql="SELECT * FROM employees",
-    embedding=[0.1, 0.2, ...],    # 768 維向量
-    user_id="alice",              # 可選：使用者 ID
-    group_id="sales",             # 可選：群組 ID
+    user_id="alice",    # 可選：使用者 ID
+    group_id="sales",   # 可選：群組 ID
     metadata={"source": "manual", "type": "basic_query"},
 )
 
@@ -138,7 +146,6 @@ qna_id = await store.insert_qna(
 sql_id = await store.insert_sql_example(
     table_id="employees",
     content="SELECT COUNT(*) FROM employees WHERE active = true",
-    embedding=[0.3, 0.4, ...],
     user_id="alice",
     group_id="sales",
     metadata={"type": "count_query"},
@@ -149,19 +156,45 @@ doc_id = await store.insert_documentation(
     table_id="employees",
     title="員工表說明",
     content="employees 表包含所有員工的基本資訊",
-    embedding=[0.5, 0.6, ...],
     user_id="alice",
     group_id="sales",
     metadata={"type": "table_doc"},
 )
 
 # 3. 搜尋訓練資料（向量相似度搜尋 + 權限過濾）
+query = "員工資料查詢"
+query_embedding = embedder.get_text_embedding(query)
+
+# 支援三種 table_path 格式：
+# - 單一表：table_path="mysql.employees"
+# - 通配符：table_path="mysql.*"（搜尋所有 mysql 表）
+# - 列表：table_path=["mysql.employees", "mysql.departments"]
+
+# 搜尋單一表
 search_results = await store.search_all(
     query_embedding=[0.1, 0.2, ...],  # 查詢向量
     table_id="employees",
     user_id="alice",                  # 搜尋者身份
     group_id="sales",
     top_k=5,
+)
+
+# 搜尋所有 mysql 表
+all_mysql_results = await store.search_all(
+    query_embedding=query_embedding,
+    table_path="mysql.*",  # 通配符
+    user_id="alice",
+    group_id="sales",
+    top_k=10,
+)
+
+# 搜尋多個指定表
+multi_results = await store.search_all(
+    query_embedding=query_embedding,
+    table_path=["mysql.employees", "mysql.departments"],  # 列表
+    user_id="alice",
+    group_id="sales",
+    top_k=8,
 )
 
 # 結果格式：{"qna": [...], "sql_examples": [...], "documentation": [...]}
@@ -173,6 +206,37 @@ for table_name, results in search_results.items():
 
 # 5. 刪除訓練資料
 """
+```
+
+#### 傳統方式（手動提供 embedding）
+
+如果你想手動管理 embedding，仍可使用傳統方法：
+
+```python
+# 不提供 embedder 的初始化
+store = await TrainingStore.initialize(
+    postgres_config=config,
+    training_schema="wisbi",
+    embedding_dim=768,
+    # 不提供 embedder
+)
+
+# 手動生成 embedding 並插入
+embedder = OpenAIEmbedding()
+question = "如何查詢所有員工？"
+answer_sql = "SELECT * FROM employees"
+embedding = embedder.get_text_embedding(f"{question} {answer_sql}")
+
+# 使用底層方法手動傳入 embedding
+qna_id = await store.insert_qna(
+    training_id=training_id,
+    table_path="mysql.employees",
+    question=question,
+    answer_sql=answer_sql,
+    embedding=embedding,  # 手動提供 embedding
+    user_id="alice",
+    group_id="sales",
+)
 ```
 
 #### 權限控制模型
@@ -241,11 +305,7 @@ t2s = Text2SQL(
 )
 
 # 5. 使用自然語言生成查詢
-query = await t2s.generate_query(
-    "每個部門有幾個主管？列出部門名稱和主管數量",
-    stream_thinking=True,  # 顯示 LLM 思考過程
-    show_thinking=True
-)
+query = await t2s.generate_query("每個部門有幾個主管？列出部門名稱和主管數量")
 print(f"生成的查詢: {query}")
 
 # 6. 執行查詢
