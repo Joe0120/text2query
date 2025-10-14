@@ -346,9 +346,9 @@ class TrainingStore:
             >>> # 插入問答對
             >>> await store.insert_training_item(
             ...     type="qna",
-            ...     table_id="employees",
+            ...     table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",
             ...     question="查詢所有員工",
-            ...     answer_sql="SELECT * FROM employees",
+            ...     answer_sql='SELECT * FROM "b2c5bce1-b684-4700-b3be-a9db93d71a2a"',
             ...     user_id="user_123",
             ...     group_id="group_A",
             ... )
@@ -356,16 +356,16 @@ class TrainingStore:
             >>> # 插入 SQL 範例
             >>> await store.insert_training_item(
             ...     type="sql_example",
-            ...     table_id="employees",
-            ...     content="SELECT COUNT(*) FROM employees WHERE active = true",
+            ...     table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",
+            ...     content='SELECT COUNT(*) FROM "b2c5bce1-b684-4700-b3be-a9db93d71a2a" WHERE hire_date IS NOT NULL',
             ... )
             
             >>> # 插入文件說明
             >>> await store.insert_training_item(
             ...     type="documentation",
-            ...     table_id="employees",
+            ...     table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",
             ...     title="員工表說明",
-            ...     content="employees 表包含所有員工的基本資訊",
+            ...     content="員工基本資料表，包含姓名、部門等資訊",
             ... )
         """
         # 驗證 type
@@ -469,9 +469,9 @@ class TrainingStore:
         Example:
             >>> # 插入個人私有資料
             >>> id = await store.insert_qna(
-            ...     table_id="employees",
+            ...     table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",
             ...     question="查詢所有員工",
-            ...     answer_sql="SELECT * FROM employees",
+            ...     answer_sql='SELECT * FROM "b2c5bce1-b684-4700-b3be-a9db93d71a2a"',
             ...     embedding=[0.1, 0.2, ...],  # 768 維向量
             ...     user_id="user_123",
             ...     group_id="group_A",
@@ -695,13 +695,13 @@ class TrainingStore:
             >>> # 搜尋單一表
             >>> results = await store.search_qna(
             ...     query_embedding=embedding,
-            ...     table_id="employees"
+            ...     table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a"
             ... )
             
             >>> # 搜尋多個指定表
             >>> results = await store.search_qna(
             ...     query_embedding=embedding,
-            ...     table_id=["employees", "departments"]
+            ...     table_id=["b2c5bce1-b684-4700-b3be-a9db93d71a2a", "f8a97f74-e446-494a-8417-b4fdefbd51c5"]
             ... )
         """
         try:
@@ -995,7 +995,7 @@ class TrainingStore:
             >>> # 搜尋指定表的所有類型資料
             >>> results = await store.search_all(
             ...     query_embedding=embedding,
-            ...     table_id=["employees", "departments"],
+            ...     table_id=["b2c5bce1-b684-4700-b3be-a9db93d71a2a", "f8a97f74-e446-494a-8417-b4fdefbd51c5"],
             ...     top_k=10
             ... )
         """

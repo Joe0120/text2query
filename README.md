@@ -134,9 +134,9 @@ store = await TrainingStore.initialize(
 
 # 新增問答對
 qna_id = await store.insert_qna(
-    table_id="employees",  # 必填：資料表 ID（字串）
+    table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",  # 必填：資料表 ID（UUID 字串）
     question="如何查詢所有員工？",
-    answer_sql="SELECT * FROM employees",
+    answer_sql='SELECT * FROM "b2c5bce1-b684-4700-b3be-a9db93d71a2a"',
     user_id="alice",    # 可選：使用者 ID
     group_id="sales",   # 可選：群組 ID
     metadata={"source": "manual", "type": "basic_query"},
@@ -144,8 +144,8 @@ qna_id = await store.insert_qna(
 
 # 新增 SQL 範例
 sql_id = await store.insert_sql_example(
-    table_id="employees",
-    content="SELECT COUNT(*) FROM employees WHERE active = true",
+    table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",
+    content='SELECT COUNT(*) FROM "b2c5bce1-b684-4700-b3be-a9db93d71a2a" WHERE hire_date IS NOT NULL',
     user_id="alice",
     group_id="sales",
     metadata={"type": "count_query"},
@@ -153,9 +153,9 @@ sql_id = await store.insert_sql_example(
 
 # 新增文件說明
 doc_id = await store.insert_documentation(
-    table_id="employees",
+    table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",
     title="員工表說明",
-    content="employees 表包含所有員工的基本資訊",
+    content="employees 表 (b2c5bce1-b684-4700-b3be-a9db93d71a2a) 包含所有員工的基本資訊",
     user_id="alice",
     group_id="sales",
     metadata={"type": "table_doc"},
@@ -165,33 +165,23 @@ doc_id = await store.insert_documentation(
 query = "員工資料查詢"
 query_embedding = embedder.get_text_embedding(query)
 
-# 支援三種 table_path 格式：
-# - 單一表：table_path="mysql.employees"
-# - 通配符：table_path="mysql.*"（搜尋所有 mysql 表）
-# - 列表：table_path=["mysql.employees", "mysql.departments"]
+# 支援兩種 table_id 格式：
+# - 單一表：table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a"
+# - 列表：table_id=["b2c5bce1-b684-4700-b3be-a9db93d71a2a", "f8a97f74-e446-494a-8417-b4fdefbd51c5"]
 
 # 搜尋單一表
 search_results = await store.search_all(
     query_embedding=[0.1, 0.2, ...],  # 查詢向量
-    table_id="employees",
+    table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",
     user_id="alice",                  # 搜尋者身份
     group_id="sales",
     top_k=5,
 )
 
-# 搜尋所有 mysql 表
-all_mysql_results = await store.search_all(
-    query_embedding=query_embedding,
-    table_path="mysql.*",  # 通配符
-    user_id="alice",
-    group_id="sales",
-    top_k=10,
-)
-
 # 搜尋多個指定表
 multi_results = await store.search_all(
     query_embedding=query_embedding,
-    table_path=["mysql.employees", "mysql.departments"],  # 列表
+    table_id=["b2c5bce1-b684-4700-b3be-a9db93d71a2a", "573342f2-9020-403e-96fb-0716f1d1e461"],  # 列表
     user_id="alice",
     group_id="sales",
     top_k=8,
@@ -255,7 +245,7 @@ TrainingStore 支援靈活的權限控制：
 # Alice 在 sales 群組搜尋 → 可存取：個人私有 + 個人跨群組 + 群組共享 + 全局公開
 alice_results = await store.search_qna(
     query_embedding=embedding,
-    table_id="employees",
+    table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",
     user_id="alice",
     group_id="sales",
     top_k=10,
@@ -264,7 +254,7 @@ alice_results = await store.search_qna(
 # 匿名使用者搜尋 → 只能存取：全局公開資料
 public_results = await store.search_qna(
     query_embedding=embedding,
-    table_id="employees",
+    table_id="b2c5bce1-b684-4700-b3be-a9db93d71a2a",
     user_id=None,
     group_id=None,
     top_k=10,
