@@ -56,7 +56,9 @@ class Text2SQL:
         question: str,
         include_history: bool = True,
         stream_thinking: bool = False,
-        show_thinking: bool = False
+        show_thinking: bool = False,
+        training_context: Optional[str] = None,
+        additional_context: Optional[str] = None,
     ) -> str:
         """
         Generate database query from natural language question
@@ -66,6 +68,8 @@ class Text2SQL:
             include_history: Whether to include chat history in prompt
             stream_thinking: Whether to stream the LLM thinking process (deprecated, always False)
             show_thinking: Whether to print the thinking process (deprecated, always False)
+            training_context: Context from SQL Training Data
+            additional_context: Additional context from additional data
 
         Returns:
             Generated database query string
@@ -88,10 +92,12 @@ class Text2SQL:
                 question=question,
                 db_structure=self.db_structure,
                 db_type=self.db_type,
-                chat_history=chat_history_text
+                chat_history=chat_history_text,
+                training_context=training_context,
+                additional_context=additional_context,
             )
 
-            self.logger.info(f"Generating query for question: {question[:50]}...")
+            self.logger.info(f"Generating query for question: {question[:50]}..., with Prompt: {prompt[:100]}...")
 
             # Always use non-streaming mode for clean async execution
             generated_query = await self._generate_without_streaming(prompt)
@@ -99,7 +105,7 @@ class Text2SQL:
             # Clean up the response
             generated_query = self._clean_query_response(generated_query)
 
-            self.logger.info(f"Generated query: {generated_query[:100]}...")
+            self.logger.info(f"Generated query: {generated_query}...")
 
             return generated_query
 
