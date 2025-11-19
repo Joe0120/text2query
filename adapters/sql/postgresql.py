@@ -311,25 +311,38 @@ class PostgreSQLAdapter(BaseQueryComposer):
         max_size = int(cfg.extra_params.get("max_pool_size", max(min_size, 5)))
         command_timeout = float(cfg.extra_params.get("command_timeout", cfg.timeout))
 
-        pool_kwargs: Dict[str, Any] = {
-            "host": cfg.host,
-            "port": cfg.port,
-            "user": cfg.username or None,
-            "password": cfg.password or None,
-            "database": cfg.database_name,
-            "min_size": min_size,
-            "max_size": max_size,
-            "timeout": cfg.timeout,
-            "command_timeout": command_timeout,
-            "server_settings": {
-                "application_name": "text2query_adapter",
-            },
-        }
+        # If a DSN/connection string is provided, prefer that over discrete params
+        if getattr(cfg, "connection_string", None):
+            pool_kwargs: Dict[str, Any] = {
+                "dsn": cfg.connection_string,  # asyncpg supports dsn
+                "min_size": min_size,
+                "max_size": max_size,
+                "timeout": cfg.timeout,
+                "command_timeout": command_timeout,
+                "server_settings": {
+                    "application_name": "text2query_adapter",
+                },
+            }
+        else:
+            pool_kwargs = {
+                "host": cfg.host,
+                "port": cfg.port,
+                "user": cfg.username or None,
+                "password": cfg.password or None,
+                "database": cfg.database_name,
+                "min_size": min_size,
+                "max_size": max_size,
+                "timeout": cfg.timeout,
+                "command_timeout": command_timeout,
+                "server_settings": {
+                    "application_name": "text2query_adapter",
+                },
+            }
 
         if cfg.schema and cfg.schema != "public":
             pool_kwargs["server_settings"]["search_path"] = cfg.schema
 
-        if cfg.ssl_mode:
+        if getattr(cfg, "ssl_mode", None):
             pool_kwargs["ssl"] = cfg.ssl_mode not in {"disable", "allow"}
 
         for key, value in cfg.extra_params.items():
