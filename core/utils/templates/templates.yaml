@@ -1,0 +1,34 @@
+templates:
+  template_001:
+    description: "Timeseries monthly revenue for a single organisation"
+    base_query: timeseries
+    dimensions:
+      time: month
+      org: single
+    fact_view: fact_financial_monthly
+    metrics:
+      - metric: ar_amount
+      - metric: revenue
+      - metric: profit
+  
+  template_002:
+    description: "Comparison quarter to quarter revenue for a multiple organisation"
+    base_query: comparison
+    dimensions:
+      time: quarter
+      org: multiple
+    fact_view: fact_financial_monthly
+    metrics:
+      - metric: revenue
+      - metric: profit
+  
+  template_003:
+    description: "Ranking year to year revenue for a all organisation"
+    base_query: ranking
+    dimensions:
+      time: year
+      org: all
+    fact_view: fact_financial_yearly
+    metrics:
+      - metric: profit
+      - metric: revenue
