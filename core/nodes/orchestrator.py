@@ -15,9 +15,9 @@ def orchestrator_node(state: WisbiState) -> WisbiState:
     if "moves_done" not in state or state["moves_done"] is None:
         state["moves_done"] = []
     
-    # Initialize current_move if not present
+    # Initialize current_move if not present - start with training (priority first)
     if state.get("current_move") is None:
-        state["current_move"] = "rag"
+        state["current_move"] = "trainer"
     
     # Track the move in moves_done (if not already tracked)
     current = state.get("current_move")
@@ -31,37 +31,39 @@ def reroute_based_on_confidence(state: WisbiState) -> Literal["orchestrator", "e
     Evaluates confidence from the current node and determines next route.
     Returns either "orchestrator" to try the next node, or "executor_node" to proceed.
     
-    Flow: After a node (rag/template/trainer) executes, this function checks
+    Flow: After a node (trainer/template) executes, this function checks
     confidence. If below threshold, routes back to orchestrator to try next node.
     Otherwise, routes to executor.
+    
+    Training is priority first, template is fallback.
     """
     reroute = False
     current = state.get("current_move")
     
-    if current == "rag":
-        rag_conf = state.get("rag_confidence")
-        if rag_conf is None:
-            # If confidence not set, assume low confidence and reroute
+    if current == "trainer":
+        # Check if trainer found good results
+        search_results = state.get("search_results")
+        if search_results is None or search_results == "":
+            # No results found, try template next
             reroute = True
         else:
-            reroute = rag_conf < 0.5
+            # Trainer found results, proceed to executor
+            reroute = False
     elif current == "template":
+        # Template is the fallback after trainer
         template_score = state.get("template_score")
         if template_score is None:
-            # If score not set, assume low confidence and reroute
-            reroute = True
+            # If score not set, assume low confidence and proceed to executor anyway
+            reroute = False
         else:
             reroute = template_score < 0.5
-    elif current == "trainer":
-        # Trainer is the last fallback, always proceed to executor
-        reroute = False
     else:
         # Unknown move, default to executor
         state["current_move"] = "executor"
         return "executor_node"
 
-    route_order = {"rag": 0, "template": 1, "trainer": 2}
-    routes = ["rag", "template", "trainer"]
+    route_order = {"trainer": 0, "template": 1}
+    routes = ["trainer", "template"]
 
     if reroute:
         current_idx = route_order.get(current, -1)
@@ -80,16 +82,14 @@ def reroute_based_on_confidence(state: WisbiState) -> Literal["orchestrator", "e
         return "executor_node"
         
 
-def route_by_current_move(state: WisbiState) -> Literal["rag_node", "template_node", "trainer_node", "clarify_node", "executor_node"]:
+def route_by_current_move(state: WisbiState) -> Literal["template_node", "trainer_node", "clarify_node", "executor_node"]:
     """
     Conditional edge function that routes from orchestrator to the appropriate node
     based on current_move in state.
     """
     current_move = state.get("current_move")
     
-    if current_move == "rag":
-        return "rag_node"
-    elif current_move == "template":
+    if current_move == "template":
         return "template_node"
     elif current_move == "trainer":
         return "trainer_node"
@@ -98,5 +98,5 @@ def route_by_current_move(state: WisbiState) -> Literal["rag_node", "template_no
     elif current_move == "executor":
         return "executor_node"
     else:
-        # Default to rag if current_move is None or invalid
-        return "rag_node"
+        # Default to trainer if current_move is None or invalid (training is priority first)
+        return "trainer_node"

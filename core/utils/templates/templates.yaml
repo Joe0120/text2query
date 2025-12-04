@@ -5,11 +5,21 @@ templates:
     dimensions:
       time: month
       org: single
-    fact_view: fact_financial_monthly
     metrics:
       - metric: ar_amount
       - metric: revenue
       - metric: profit
+    sql: |
+      SELECT 
+        DATE_TRUNC('month', dt) as month,
+        SUM(ar_amount) as ar_amount,
+        SUM(revenue) as revenue,
+        SUM(profit) as profit
+      FROM fact_financial_monthly
+      WHERE org_id = :org_id
+        AND dt BETWEEN :start_date AND :end_date
+      GROUP BY month
+      ORDER BY month;
   
   template_002:
     description: "Comparison quarter to quarter revenue for a multiple organisation"
@@ -17,10 +27,22 @@ templates:
     dimensions:
       time: quarter
       org: multiple
-    fact_view: fact_financial_monthly
     metrics:
       - metric: revenue
       - metric: profit
+    sql: |
+      SELECT 
+        DATE_TRUNC('quarter', dt) as quarter,
+        org_id,
+        SUM(revenue) as revenue,
+        SUM(profit) as profit,
+        LAG(SUM(revenue)) OVER (PARTITION BY org_id ORDER BY DATE_TRUNC('quarter', dt)) as prev_quarter_revenue,
+        LAG(SUM(profit)) OVER (PARTITION BY org_id ORDER BY DATE_TRUNC('quarter', dt)) as prev_quarter_profit
+      FROM fact_financial_monthly
+      WHERE org_id IN (:org_ids)
+        AND dt BETWEEN :start_date AND :end_date
+      GROUP BY quarter, org_id
+      ORDER BY org_id, quarter;
   
   template_003:
     description: "Ranking year to year revenue for a all organisation"
@@ -28,7 +50,18 @@ templates:
     dimensions:
       time: year
       org: all
-    fact_view: fact_financial_yearly
     metrics:
       - metric: profit
       - metric: revenue
+    sql: |
+      SELECT 
+        DATE_TRUNC('year', dt) as year,
+        org_id,
+        SUM(profit) as profit,
+        SUM(revenue) as revenue,
+        RANK() OVER (PARTITION BY DATE_TRUNC('year', dt) ORDER BY SUM(revenue) DESC) as revenue_rank,
+        RANK() OVER (PARTITION BY DATE_TRUNC('year', dt) ORDER BY SUM(profit) DESC) as profit_rank
+      FROM fact_financial_yearly
+      WHERE dt BETWEEN :start_date AND :end_date
+      GROUP BY year, org_id
+      ORDER BY year DESC, revenue DESC;

@@ -42,7 +42,6 @@ def human_explanation_node(state: WisbiState) -> WisbiState:
             state["moves_done"] = []
             state["current_move"] = None
             # Clear confidence scores to restart
-            state["rag_confidence"] = None
             state["template_score"] = None
             # Update query text with explanation if needed (optional)
             # Or append explanation to query for better context
