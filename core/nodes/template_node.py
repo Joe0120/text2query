@@ -107,12 +107,11 @@ class TemplateRepo:
             logger.info("Template store is empty, auto-populating from templates.yaml")
             templates = self.load_templates()
             
-            # Insert all templates in the store with SQL from YAML or auto-generation
+            # Insert all templates in the store with SQL from YAML
             for template in templates.values():
                 await self.template_store.insert_template(
                     template=template,
-                    sql_command=template.sql,  # Use SQL from YAML if available
-                    generate_sql=template.sql is None,  # Only generate if not provided
+                    sql_command=template.sql,
                 )
             
             logger.info(f"Auto-populated {len(templates)} templates to store")

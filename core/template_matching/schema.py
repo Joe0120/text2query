@@ -29,10 +29,6 @@ def get_template_ddl(
             id bigserial PRIMARY KEY,
             template_id text NOT NULL UNIQUE,
             description text,
-            base_query text,
-            dimensions jsonb NOT NULL DEFAULT '{{}}'::jsonb,
-            filters jsonb NOT NULL DEFAULT '{{}}'::jsonb,
-            metrics jsonb NOT NULL DEFAULT '[]'::jsonb,
             sql_command text,
             components_text text NOT NULL,
             embedding vector({embedding_dim}) NOT NULL,
@@ -48,6 +44,5 @@ def get_template_ddl(
         
         # Create indexes for faster lookups
         f"CREATE INDEX IF NOT EXISTS templates_template_id_idx ON {schema_name}.templates (template_id, is_active)",
-        f"CREATE INDEX IF NOT EXISTS templates_base_query_idx ON {schema_name}.templates (base_query, is_active)",
     ]
 

@@ -242,118 +242,6 @@ class TemplateStore:
             self.logger.exception(f"Error generating embedding: {e}")
             raise
     
-    async def _generate_sql_from_template(
-        self,
-        template: Template,
-        db_schema: Optional[str] = None,
-    ) -> Optional[str]:
-        """Generate SQL command from template components
-        
-        Args:
-            template: Template object
-            db_schema: Database schema string (optional)
-            
-        Returns:
-            Optional[str]: Generated SQL command or None if generation fails
-        """
-        if self.llm_config is None:
-            self.logger.warning("LLM config not provided, cannot generate SQL")
-            return None
-        
-        try:
-            # Get database schema if not provided
-            if db_schema is None:
-                adapter = self._get_adapter()
-                try:
-                    db_schema = await adapter.get_schema_str()
-                    if not db_schema:
-                        self.logger.warning("Could not retrieve database schema")
-                        db_schema = "Database schema information not available"
-                except Exception as e:
-                    self.logger.warning(f"Failed to get database schema: {e}")
-                    db_schema = "Database schema information not available"
-            
-            # Build prompt for SQL generation
-            metrics_list = []
-            for metric in template.metrics:
-                if isinstance(metric, dict):
-                    metric_name = metric.get("metric") or metric.get("name")
-                    if metric_name:
-                        metrics_list.append(metric_name)
-                elif isinstance(metric, str):
-                    metrics_list.append(metric)
-            
-            dims = template.dimensions or {}
-            filters = template.filters or {}
-            
-            prompt = f"""You are a PostgreSQL database expert. Generate a SQL query based on the following template requirements:
-
-Template Description: {template.description}
-Base Query Type: {template.base_query or 'N/A'}
-
-Metrics to include:
-{chr(10).join([f"  - {m}" for m in metrics_list]) if metrics_list else "  (none)"}
-
-Dimensions:
-{chr(10).join([f"  - {k}: {v}" for k, v in dims.items() if v]) if dims else "  (none)"}
-
-Filters:
-{json.dumps(filters, indent=2) if filters else "  (none)"}
-
-Database Schema:
-{db_schema}
-
-Instructions:
-1. Generate a SQL SELECT query based on the base_query type:
-   - timeseries: Time-series query with GROUP BY on time dimension
-   - snapshot: Point-in-time query
-   - comparison: Comparison query (e.g., quarter-over-quarter)
-   - ranking: Ranking query with ORDER BY
-2. Include all specified metrics and dimensions
-3. Apply filters as needed
-4. Use proper PostgreSQL syntax with double quotes for identifiers
-5. Only return the SQL statement, no explanations or markdown formatting
-
-Generate the SQL query:"""
-
-            messages = [{"role": "user", "content": prompt}]
-            response = await agenerate_chat(self.llm_config, messages)
-            
-            # Clean up the response
-            sql = self._extract_sql_from_response(response)
-            
-            return sql
-            
-        except Exception as e:
-            self.logger.exception(f"Failed to generate SQL from template: {e}")
-            return None
-    
-    def _clean_sql_response(self, sql: str) -> str:
-        """Clean up LLM SQL response"""
-        import re
-        # Remove markdown code blocks
-        if "```" in sql:
-            pattern = r'```(?:\w+)?\n?(.*?)```'
-            matches = re.findall(pattern, sql, re.DOTALL)
-            if matches:
-                sql = matches[0].strip()
-        
-        # Remove leading/trailing whitespace
-        sql = sql.strip()
-        
-        return sql
-    
-    def _extract_sql_from_response(self, response: str) -> str:
-        """Extract SQL statement from LLM response"""
-        import re
-        # Try to find CREATE/SELECT/INSERT/UPDATE/DELETE statement
-        sql_match = re.search(r'(CREATE|SELECT|INSERT|UPDATE|DELETE).*?(?:;|$)', response, re.DOTALL | re.IGNORECASE)
-        if sql_match:
-            return sql_match.group(0).strip()
-        
-        # If no SQL found, return cleaned response
-        return self._clean_sql_response(response)
-    
     # ============================================================================
     # Insert template
     # ============================================================================
@@ -364,16 +252,14 @@ Generate the SQL query:"""
         sql_command: Optional[str] = None,
         components: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        generate_sql: bool = True,
     ) -> Optional[int]:
         """Insert a template into the store
         
         Args:
             template: Template object
-            sql_command: SQL command associated with this template (if None and generate_sql=True, will be generated)
+            sql_command: SQL command associated with this template
             components: Components dictionary (if None, will be derived from template)
             metadata: Additional metadata
-            generate_sql: Whether to generate SQL if sql_command is None (default: True)
             
         Returns:
             Optional[int]: Template ID if successful, None otherwise
@@ -389,12 +275,6 @@ Generate the SQL query:"""
                     "filters": template.filters,
                 }
             
-            # Generate SQL if not provided and generation is enabled
-            if sql_command is None and generate_sql:
-                sql_command = await self._generate_sql_from_template(template)
-                if sql_command:
-                    self.logger.info(f"Generated SQL for template {template.id}")
-            
             # Convert components to text for embedding
             components_text = self._components_to_text(components)
             
@@ -402,9 +282,6 @@ Generate the SQL query:"""
             embedding = await self._generate_embedding(components_text)
             
             # Prepare data
-            dimensions_json = json.dumps(template.dimensions, ensure_ascii=False)
-            filters_json = json.dumps(template.filters, ensure_ascii=False)
-            metrics_json = json.dumps(template.metrics, ensure_ascii=False)
             metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
             
             # Convert embedding to PostgreSQL vector format
@@ -412,21 +289,15 @@ Generate the SQL query:"""
             
             insert_sql = f"""
                 INSERT INTO {self.template_schema}.templates (
-                    template_id, description, base_query,
-                    dimensions, filters, metrics,
+                    template_id, description,
                     sql_command, components_text, embedding, metadata
                 ) VALUES (
                     $1, $2, $3,
-                    $4::jsonb, $5::jsonb, $6::jsonb,
-                    $7, $8, $9::vector, $10::jsonb
+                    $4, $5, $6::vector, $7::jsonb
                 )
                 ON CONFLICT (template_id) 
                 DO UPDATE SET
                     description = EXCLUDED.description,
-                    base_query = EXCLUDED.base_query,
-                    dimensions = EXCLUDED.dimensions,
-                    filters = EXCLUDED.filters,
-                    metrics = EXCLUDED.metrics,
                     sql_command = EXCLUDED.sql_command,
                     components_text = EXCLUDED.components_text,
                     embedding = EXCLUDED.embedding,
@@ -438,10 +309,6 @@ Generate the SQL query:"""
             params = (
                 template.id,
                 template.description,
-                template.base_query,
-                dimensions_json,
-                filters_json,
-                metrics_json,
                 sql_command,
                 components_text,
                 embedding_str,
@@ -495,8 +362,7 @@ Generate the SQL query:"""
             # Use cosine similarity for vector search
             search_sql = f"""
                 SELECT 
-                    template_id, description, base_query,
-                    dimensions, filters, metrics,
+                    template_id, description,
                     sql_command, components_text,
                     1 - (embedding <=> $1::vector) as similarity
                 FROM {self.template_schema}.templates
@@ -527,10 +393,10 @@ Generate the SQL query:"""
                 template = Template(
                     id=row_dict["template_id"],
                     description=row_dict["description"],
-                    base_query=row_dict["base_query"],
-                    dimensions=row_dict["dimensions"] or {},
-                    filters=row_dict["filters"] or {},
-                    metrics=row_dict["metrics"] or [],
+                    base_query=None,
+                    dimensions={},
+                    filters={},
+                    metrics=[],
                     sql=sql_command,
                 )
                 
