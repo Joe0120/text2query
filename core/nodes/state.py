@@ -35,3 +35,11 @@ class WisbiState(TypedDict):
     # Template matching
     template: Optional[Template]
     template_score: Optional[float]
+    
+    # Human approval and clarification
+    human_approved: NotRequired[Optional[bool]]
+    human_explanation: NotRequired[Optional[str]]  # Human explanation/feedback to restart workflow
+    tool_results: NotRequired[Optional[str]]  # Results/risk assessment for human review
+    intent: NotRequired[Optional[str]]  # Intent type (e.g., "trade", "query", etc.)
+    user_profile: NotRequired[Optional[Dict[str, Any]]]  # User profile information
+    clarification_requested: NotRequired[Optional[bool]]  # Flag to indicate clarification is needed

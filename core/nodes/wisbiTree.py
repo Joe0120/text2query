@@ -6,6 +6,7 @@ from .orchestrator import orchestrator_node, reroute_based_on_confidence, route_
 from .rag_node import RAGNode
 from .template_node import TemplateNode
 from .trainer_node import TrainerNode
+from .human_appoval import human_explanation_node, need_human_approval
 
 
 class WisbiWorkflow:
@@ -15,7 +16,9 @@ class WisbiWorkflow:
     Flow:
     1. orchestrator_node → routes to (rag_node/template_node/trainer_node/clarify_node/executor_node)
     2. After rag/template/trainer → reroute_based_on_confidence → (orchestrator for next node OR executor_node)
-    3. executor_node → END
+    3. clarify_node → human_explanation_node → (gets explanation) → orchestrator_node (restart workflow)
+    4. executor_node → need_human_approval → (human_approval OR END)
+    5. human_approval → executor_node (if approved) OR END (if rejected)
     
     Usage:
         workflow = WisbiWorkflow(
@@ -72,9 +75,10 @@ class WisbiWorkflow:
         
         # Default clarify node if not provided
         async def default_clarify_node(state: WisbiState) -> WisbiState:
-            """Default clarify node - can be replaced with actual implementation"""
-            # TODO: Implement clarification logic
-            state["current_move"] = "executor"  # After clarification, proceed to executor
+            """Default clarify node - sets flag to request human explanation"""
+            # Set flag to indicate clarification is needed
+            state["clarification_requested"] = True
+            # Route to human_approval_node to get explanation
             return state
         
         executor = self.executor_node if self.executor_node else default_executor_node
@@ -110,6 +114,7 @@ class WisbiWorkflow:
         workflow.add_node("trainer_node", node_wrappers["trainer_node"])
         workflow.add_node("clarify_node", node_wrappers["clarify_node"])
         workflow.add_node("executor_node", node_wrappers["executor_node"])
+        workflow.add_node("human_explanation_node", human_explanation_node)
         
         # Set entry point
         workflow.set_entry_point("orchestrator")
@@ -156,11 +161,53 @@ class WisbiWorkflow:
             }
         )
         
-        # Clarify node goes directly to executor (or could loop back to orchestrator)
-        workflow.add_edge("clarify_node", "executor_node")
+        # Clarify node goes to human_approval to get explanation
+        workflow.add_edge("clarify_node", "human_approval")
         
-        # Executor is the final node
-        workflow.add_edge("executor_node", END)
+        # Executor node: prepare and check if human approval is needed
+        # If approval needed and not yet given, go to human_approval
+        # If approval not needed or already approved, go to END
+        workflow.add_conditional_edges(
+            "executor_node",
+            need_human_approval,
+            {
+                "human_approval": "human_approval",
+                END: END,  # No approval needed or already approved/rejected, execution complete
+            }
+        )
+        
+        # Human approval routes based on context
+        def route_after_human_interaction(state: WisbiState) -> Literal["orchestrator", "executor_node", END]:
+            """Route after human approval/explanation"""
+            # Check if we have a human explanation (from clarification flow)
+            if state.get("human_explanation"):
+                # Explanation received, restart workflow from beginning
+                # Clear the explanation flag to prevent infinite loops
+                explanation = state.get("human_explanation")
+                state["human_explanation"] = None  # Clear after routing
+                return "orchestrator"
+            
+            # Check if approval was given (from approval flow)
+            if state.get("human_approved") is True:
+                # Approved: go back to executor_node to actually execute
+                return "executor_node"
+            elif state.get("human_approved") is False:
+                # Rejected: end workflow
+                return END
+            
+            # Default: if no explanation and no approval decision, end workflow
+            # This shouldn't normally happen, but prevents hanging
+            return END
+        
+        workflow.add_conditional_edges(
+            "human_approval",
+            route_after_human_interaction,
+            {
+                "orchestrator": "orchestrator",  # Explanation received, restart workflow
+                "executor_node": "executor_node",  # Approved, execute
+                END: END,  # Rejected, end workflow
+            }
+        )
         
         self._compiled_graph = workflow.compile()
         return self._compiled_graph
