@@ -293,7 +293,7 @@ class TemplateStore:
                     sql_command, components_text, embedding, metadata
                 ) VALUES (
                     $1, $2, $3,
-                    $4, $5, $6::vector, $7::jsonb
+                    $4, $5::vector, $6::jsonb
                 )
                 ON CONFLICT (template_id) 
                 DO UPDATE SET

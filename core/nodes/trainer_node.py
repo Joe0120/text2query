@@ -50,9 +50,13 @@ class TrainerNode:
             query_embedding = await aembed_text(state["embedder_config"], query_text)
             state["query_embedding"] = query_embedding
         
+        table_id = state.get("table_id")
+        if table_id is None:
+            raise ValueError("table_id is required in state for TrainerNode")
+        
         search_results = await self.training_store.search_all(
             query_embedding=state["query_embedding"],
-            table_id=state.get("table_id"),
+            table_id=table_id,
             user_id=state.get("user_id", None),
             group_id=state.get("group_id", None),
             top_k=state.get("top_k", 8),
