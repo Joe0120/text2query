@@ -24,7 +24,7 @@ class TemplateStore:
             postgres_config=PostgreSQLConfig(...),
             template_schema="wisbi",
             embedding_dim=768,
-            llm_config=ModelConfig(...),  # For generating embeddings
+            embedder_config=ModelConfig(...),  # For generating embeddings
         )
     """
     

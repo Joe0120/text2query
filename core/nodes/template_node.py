@@ -37,6 +37,7 @@ class TemplateRepo:
             template_store: Pre-initialized TemplateStore instance (optional)
             db_config: PostgreSQL config for TemplateStore (required if template_store not provided)
             llm_config: LLM config for embeddings (required if template_store not provided)
+            embedder_config: Embedder config for generating embeddings (required if template_store not provided)
             template_schema: Schema name for template tables (default: "wisbi")
             embedding_dim: Embedding vector dimension (default: 768)
         """
@@ -44,6 +45,7 @@ class TemplateRepo:
         self.template_store = template_store
         self.db_config = db_config
         self.llm_config = llm_config
+        self.embedder_config = embedder_config
         self.template_schema = template_schema
         self.embedding_dim = embedding_dim
         self.templates: Dict[str, Template] = {}
@@ -90,16 +92,16 @@ class TemplateRepo:
     async def initialize(self) -> None:
         """Initialize TemplateRepo and auto-populate templates if store is empty"""
         if self.template_store is None:
-            if self.db_config is None or self.llm_config is None:
+            if self.db_config is None or self.embedder_config is None:
                 raise ValueError(
-                    "Either template_store must be provided, or both db_config and llm_config "
+                    "Either template_store must be provided, or both db_config and embedder_config "
                     "must be provided for TemplateRepo initialization"
                 )
             self.template_store = await TemplateStore.initialize(
                 postgres_config=self.db_config,
                 template_schema=self.template_schema,
                 embedding_dim=self.embedding_dim,
-                llm_config=self.llm_config,
+                embedder_config=self.embedder_config,
             )
         
         # Auto-populate templates from YAML if store is empty
