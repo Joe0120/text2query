@@ -123,7 +123,7 @@ class WisbiWorkflow:
     def _create_node_wrappers(self) -> Dict[str, Any]:
         """Create async wrapper functions for node classes."""
 
-        if not self.template_node or not self.trainer_node:
+        if not self.template_node or not self.trainer_node or not self.memory_node:
             raise RuntimeError("Workflow nodes not initialized. Call await build() first.")
 
         async def template_node_wrapper(state: WisbiState) -> WisbiState:

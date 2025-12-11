@@ -17,6 +17,10 @@ class ConversationMemoryStore:
     This class handles storing and retrieving conversation history for ChatGPT-like
     interfaces, where each conversation (chat_id) maintains its own isolated memory.
     
+    A single chat_id can be shared by multiple users. Each row stores the sender's
+    user_id; history retrieval is done per chat_id (not per user), and any
+    permission checks should be handled by higher layers.
+    
     Usage:
         # Initialize instance (auto-creates tables) - call once at app startup
         store = await ConversationMemoryStore.initialize(
@@ -36,7 +40,7 @@ class ConversationMemoryStore:
         postgres_config: PostgreSQLConfig,
         memory_schema: str = "wisbi",
     ):
-        """Initialize ConversationMemoryStore
+        """Initialize ConversationMemoryStore.
         
         Note: Recommended to use ConversationMemoryStore.initialize() which
         automatically checks and creates required tables.
@@ -57,10 +61,7 @@ class ConversationMemoryStore:
         memory_schema: str = "wisbi",
         auto_init_tables: bool = True,
     ) -> "ConversationMemoryStore":
-        """Initialize ConversationMemoryStore instance and auto-setup tables
-        
-        This is the recommended initialization method, which automatically
-        checks and creates required tables if they don't exist.
+        """Initialize ConversationMemoryStore instance and auto-setup tables.
         
         Args:
             postgres_config: PostgreSQL connection configuration
@@ -76,21 +77,31 @@ class ConversationMemoryStore:
             table_exists = await store.check_table_exists()
             
             if not table_exists:
-                store.logger.info(f"Missing conversation_history table in schema '{memory_schema}'")
+                store.logger.info(
+                    f"Missing conversation_history table in schema '{memory_schema}'"
+                )
                 store.logger.info("Creating memory tables...")
                 
                 success = await store.init_memory_tables()
                 if success:
-                    store.logger.info(f"Memory tables initialized successfully in schema '{memory_schema}'")
+                    store.logger.info(
+                        f"Memory tables initialized successfully in schema '{memory_schema}'"
+                    )
                 else:
                     store.logger.warning("Failed to initialize memory tables")
             else:
-                store.logger.info(f"Conversation history table already exists in schema '{memory_schema}'")
+                store.logger.info(
+                    f"Conversation history table already exists in schema '{memory_schema}'"
+                )
         
         return store
     
     def _get_adapter(self) -> PostgreSQLAdapter:
-        """Get or create PostgreSQL adapter"""
+        """Get or create PostgreSQL adapter.
+        
+        Returns:
+            PostgreSQLAdapter: PostgreSQL adapter instance
+        """
         if self._adapter is None:
             self._adapter = PostgreSQLAdapter(self.postgres_config)
         return self._adapter
@@ -100,7 +111,7 @@ class ConversationMemoryStore:
     # ============================================================================
     
     async def init_memory_tables(self) -> bool:
-        """Initialize conversation history tables and indexes
+        """Initialize conversation history tables and indexes.
         
         This method:
         1. Creates schema (if not exists)
@@ -112,26 +123,30 @@ class ConversationMemoryStore:
         """
         try:
             adapter = self._get_adapter()
-            ddl_statements = get_memory_ddl(
-                schema_name=self.memory_schema
-            )
+            ddl_statements = get_memory_ddl(schema_name=self.memory_schema)
             
             for idx, ddl in enumerate(ddl_statements, 1):
-                self.logger.debug(f"Executing DDL statement {idx}/{len(ddl_statements)}")
+                self.logger.debug(
+                    f"Executing DDL statement {idx}/{len(ddl_statements)}"
+                )
                 result = await adapter.sql_execution(
                     ddl,
                     safe=False,  # DDL statements need safe=False
-                    limit=None
+                    limit=None,
                 )
                 
                 if not result.get("success"):
                     error_msg = result.get("error", "Unknown error")
-                    self.logger.error(f"Failed to execute DDL statement {idx}: {error_msg}")
-                    ddl_preview = ddl.strip()[:200].replace('\n', ' ')
+                    self.logger.error(
+                        f"Failed to execute DDL statement {idx}: {error_msg}"
+                    )
+                    ddl_preview = ddl.strip()[:200].replace("\n", " ")
                     self.logger.error(f"Failed DDL: {ddl_preview}...")
                     return False
             
-            self.logger.info(f"Successfully set up memory tables in schema '{self.memory_schema}'")
+            self.logger.info(
+                f"Successfully set up memory tables in schema '{self.memory_schema}'"
+            )
             return True
             
         except Exception as e:
@@ -139,21 +154,27 @@ class ConversationMemoryStore:
             return False
     
     async def check_table_exists(self) -> bool:
-        """Check if conversation_history table exists
+        """Check if conversation_history table exists.
         
         Returns:
             bool: True if table exists, False otherwise
         """
         try:
             adapter = self._get_adapter()
-            check_query = f"""
+            # Use parameterized query to prevent SQL injection
+            check_query = """
                 SELECT table_name 
                 FROM information_schema.tables 
-                WHERE table_schema = '{self.memory_schema}' 
-                AND table_name = 'conversation_history'
+                WHERE table_schema = $1 
+                  AND table_name = $2
             """
             
-            result = await adapter.sql_execution(check_query, safe=False, limit=None)
+            result = await adapter.sql_execution(
+                check_query,
+                params=(self.memory_schema, "conversation_history"),
+                safe=False,
+                limit=None,
+            )
             
             if not result.get("success"):
                 return False
@@ -182,20 +203,20 @@ class ConversationMemoryStore:
         confidence_score: Optional[float] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
-        """Save a conversation message to history
+        """Save a conversation message to history.
         
         Args:
-            chat_id: Conversation ID (UUID string)
-            turn_number: Turn number within chat (1, 2, 3...)
-            user_id: User ID
-            group_id: Group ID
+            chat_id: Conversation ID (UUID string or similar)
+            turn_number: Turn number within chat (1, 2, 3...) across all participants
+            user_id: Sender user ID (the human who asked the question)
+            group_id: Group / tenant / workspace ID
             user_message: User's natural language question
-            assistant_response: Generated SQL/query
-            result_summary: Summary of results
-            result_count: Number of rows returned
-            strategy_used: Strategy used ('template', 'trainer')
-            confidence_score: Confidence score from strategy
-            metadata: Additional metadata
+            assistant_response: Assistant's response (SQL / NL / etc.)
+            result_summary: Summary of results (optional)
+            result_count: Number of rows returned (optional)
+            strategy_used: Strategy used ('template', 'trainer', etc.)
+            confidence_score: Confidence score from strategy (optional)
+            metadata: Additional metadata (will be stored as JSONB)
         
         Returns:
             Optional[int]: Message ID if successful, None otherwise
@@ -237,11 +258,19 @@ class ConversationMemoryStore:
                 metadata_json,
             )
             
-            result = await adapter.sql_execution(insert_sql, params=params, safe=False, limit=None)
+            result = await adapter.sql_execution(
+                insert_sql,
+                params=params,
+                safe=False,
+                limit=None,
+            )
             
             if result.get("success") and result.get("result"):
                 inserted_id = result["result"][0][0]
-                self.logger.info(f"Saved conversation message: id={inserted_id}, chat_id={chat_id}, turn={turn_number}")
+                self.logger.info(
+                    f"Saved conversation message: id={inserted_id}, "
+                    f"chat_id={chat_id}, turn={turn_number}"
+                )
                 return int(inserted_id)
             else:
                 error_msg = result.get("error", "Unknown error")
@@ -259,18 +288,16 @@ class ConversationMemoryStore:
     async def get_chat_history(
         self,
         chat_id: str,
-        user_id: str,
         max_turns: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Get conversation history for a chat
+        """Get conversation history for a chat (all participants).
         
         Args:
             chat_id: Conversation ID
-            user_id: User ID (for permission check)
             max_turns: Maximum number of turns to return (None = all)
         
         Returns:
-            List[Dict]: List of messages ordered by turn_number
+            List[Dict[str, Any]]: List of messages ordered by turn_number
         """
         try:
             adapter = self._get_adapter()
@@ -287,24 +314,25 @@ class ConversationMemoryStore:
                     metadata, created_at
                 FROM {self.memory_schema}.conversation_history
                 WHERE chat_id = $1
-                  AND user_id = $2
                   AND is_active = true
                 ORDER BY turn_number ASC
                 {limit_clause}
             """
             
             result = await adapter.sql_execution(
-                select_sql, 
-                params=(chat_id, user_id),
+                select_sql,
+                params=(chat_id,),
                 safe=False,
-                limit=None
+                limit=None,
             )
             
             if result.get("success"):
                 columns = result.get("columns", [])
                 rows = result.get("result", [])
                 messages = [dict(zip(columns, row)) for row in rows]
-                self.logger.info(f"Retrieved {len(messages)} messages for chat_id={chat_id}")
+                self.logger.info(
+                    f"Retrieved {len(messages)} messages for chat_id={chat_id}"
+                )
                 return messages
             else:
                 error_msg = result.get("error", "Unknown error")
@@ -318,29 +346,35 @@ class ConversationMemoryStore:
     async def get_chat_context(
         self,
         chat_id: str,
-        user_id: str,
         context_window: int = 10,
     ) -> str:
-        """Get formatted conversation context for LLM
+        """Get formatted conversation context for LLM.
         
         Args:
             chat_id: Conversation ID
-            user_id: User ID
-            context_window: Number of recent messages to include
+            context_window: Number of recent messages (turns) to include
         
         Returns:
             str: Formatted context string
         """
-        messages = await self.get_chat_history(chat_id, user_id, max_turns=context_window)
+        messages = await self.get_chat_history(
+            chat_id,
+            max_turns=context_window,
+        )
         
         if not messages:
             return ""
         
-        lines = []
+        lines: List[str] = []
         for msg in messages:
-            lines.append(f"User: {msg['user_message']}")
-            lines.append(f"Assistant: {msg['assistant_response']}")
-            if msg.get('result_summary'):
+            # Handle None values gracefully
+            user_id = msg.get('user_id') or 'Unknown'
+            user_message = msg.get('user_message') or ''
+            assistant_response = msg.get('assistant_response') or ''
+            
+            lines.append(f"User ({user_id}): {user_message}")
+            lines.append(f"Assistant: {assistant_response}")
+            if msg.get("result_summary"):
                 lines.append(f"Result: {msg['result_summary']}")
             lines.append("")  # Blank line between turns
         
@@ -349,13 +383,13 @@ class ConversationMemoryStore:
     async def get_next_turn_number(
         self,
         chat_id: str,
-        user_id: str,
     ) -> int:
-        """Get next turn number for a chat
+        """Get next turn number for a chat.
+        
+        Turn numbers are per-chat (shared across all users in the chat).
         
         Args:
             chat_id: Conversation ID
-            user_id: User ID
         
         Returns:
             int: Next turn number (1 if chat is new)
@@ -364,18 +398,17 @@ class ConversationMemoryStore:
             adapter = self._get_adapter()
             
             select_sql = f"""
-                SELECT MAX(turn_number) as max_turn
+                SELECT MAX(turn_number) AS max_turn
                 FROM {self.memory_schema}.conversation_history
                 WHERE chat_id = $1
-                  AND user_id = $2
                   AND is_active = true
             """
             
             result = await adapter.sql_execution(
                 select_sql,
-                params=(chat_id, user_id),
+                params=(chat_id,),
                 safe=False,
-                limit=None
+                limit=None,
             )
             
             if result.get("success") and result.get("result"):
@@ -392,12 +425,11 @@ class ConversationMemoryStore:
     # Connection management
     # ============================================================================
     
-    async def close(self):
-        """Close database connection
+    async def close(self) -> None:
+        """Close database connection.
         
         In backend services, usually not needed as connection pool manages this.
         """
         if self._adapter:
             await self._adapter.close_pool()
             self.logger.debug("ConversationMemoryStore connection closed")
-

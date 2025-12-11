@@ -47,21 +47,16 @@ class MemoryNode:
         """
         chat_id = state.get("chat_id")
         
-        # Create new chat_id if none exists
         if not chat_id:
             chat_id = str(uuid.uuid4())
             state["chat_id"] = chat_id
             state["turn_number"] = 1
         else:
-            # Get next turn number for existing chat
-            turn_number = await self.memory_store.get_next_turn_number(
-                chat_id, state["user_id"]
-            )
+            turn_number = await self.memory_store.get_next_turn_number(chat_id)
             state["turn_number"] = turn_number
-            
-            # Get recent context (last N messages)
+
             context = await self.memory_store.get_chat_context(
-                chat_id, state["user_id"], context_window=10
+                chat_id, context_window=10
             )
             state["chat_context"] = context
         
@@ -78,7 +73,6 @@ class MemoryNode:
         """
         chat_id = state.get("chat_id")
         if not chat_id:
-            # No chat_id, skip saving
             return state
         
         turn_number = state.get("turn_number", 1)
@@ -86,7 +80,6 @@ class MemoryNode:
         assistant_response = state.get("generated_query", "")
         
         if not user_message:
-            # No user message, skip saving
             return state
         
         # Extract execution results
@@ -103,11 +96,17 @@ class MemoryNode:
         }
         
         # Save message
+        user_id = state.get("user_id")
+        group_id = state.get("group_id")
+        if not user_id or not group_id:
+            # Skip saving if user_id or group_id is not available
+            return state
+        
         await self.memory_store.save_message(
             chat_id=chat_id,
             turn_number=turn_number,
-            user_id=state["user_id"],
-            group_id=state.get("group_id", ""),
+            user_id=user_id,
+            group_id=group_id,
             user_message=user_message,
             assistant_response=assistant_response,
             result_summary=result_summary,
@@ -118,18 +117,3 @@ class MemoryNode:
         )
         
         return state
-    
-    async def __call__(self, state: WisbiState) -> WisbiState:
-        """Callable interface - retrieves context by default
-        
-        This allows the node to be used directly in the workflow.
-        For saving, call save_message() explicitly after execution.
-        
-        Args:
-            state: Current workflow state
-        
-        Returns:
-            WisbiState: Updated state with context
-        """
-        return await self.retrieve_context(state)
-

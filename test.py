@@ -57,8 +57,8 @@ async def run_workflow() -> WisbiState:
         "llm_config": llm_config,
         "embedder_config": embedder_config,
         "query_text": "Show me total sales last month",
-        # "user_id": "demo_user",
-        # "group_id": "demo_group",
+        "user_id": "demo_user",
+        "group_id": "demo_group",
         "table_id": "demo_table_id",
         "top_k": 8,
     }

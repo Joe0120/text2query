@@ -25,11 +25,13 @@ def get_memory_ddl(
         CREATE TABLE IF NOT EXISTS {schema_name}.{table_name} (
             id bigserial PRIMARY KEY,
             
-            -- Conversation grouping
+            -- Conversation grouping (shared by multiple users)
             chat_id text NOT NULL,
             turn_number integer NOT NULL,
             
-            -- User/Group context
+            -- Sender / tenant context
+            -- user_id: the sender of this turn (not the "owner" of the chat)
+            -- group_id: workspace / tenant / org identifier
             user_id text NOT NULL,
             group_id text NOT NULL DEFAULT '',
             
@@ -53,8 +55,13 @@ def get_memory_ddl(
         """,
         
         # Create indexes
-        f"CREATE INDEX IF NOT EXISTS {table_name}_chat_idx ON {schema_name}.{table_name} (chat_id, turn_number)",
-        f"CREATE INDEX IF NOT EXISTS {table_name}_user_idx ON {schema_name}.{table_name} (user_id, group_id, chat_id, created_at DESC)",
-        f"CREATE INDEX IF NOT EXISTS {table_name}_created_at_idx ON {schema_name}.{table_name} (created_at DESC)",
+        f"CREATE INDEX IF NOT EXISTS {table_name}_chat_idx "
+        f"ON {schema_name}.{table_name} (chat_id, turn_number)",
+        
+        # Per-user lookup index (still useful e.g. "recent chats for this user")
+        f"CREATE INDEX IF NOT EXISTS {table_name}_user_idx "
+        f"ON {schema_name}.{table_name} (user_id, group_id, chat_id, created_at DESC)",
+        
+        f"CREATE INDEX IF NOT EXISTS {table_name}_created_at_idx "
+        f"ON {schema_name}.{table_name} (created_at DESC)",
     ]
-
