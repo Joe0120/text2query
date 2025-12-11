@@ -171,8 +171,8 @@ class TemplateNode:
         "    region: <string|null>\n"
         "    industry: <string|null>\n"
         "  filters:\n"
-        "    standard: {date_range: <bool>, org_filter: <bool>}\n"
-        "    business: {doc_type: <bool>, threshold: <bool>}\n\n"
+        "    standard: {{date_range: <bool>, org_filter: <bool>}}\n"
+        "    business: {{doc_type: <bool>, threshold: <bool>}}\n\n"
         "Query: {query}\n"
     ).strip()
     
