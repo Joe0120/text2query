@@ -26,6 +26,7 @@ class TemplateRepo:
         template_store: Optional[TemplateStore] = None,
         db_config: Optional[PostgreSQLConfig] = None,
         llm_config: Optional[ModelConfig] = None,
+        embedder_config: Optional[ModelConfig] = None,
         template_schema: str = "wisbi",
         embedding_dim: int = 768,
     ):

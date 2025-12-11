@@ -33,7 +33,7 @@ class TemplateStore:
         postgres_config: PostgreSQLConfig,
         template_schema: str = "wisbi",
         embedding_dim: int = 768,
-        llm_config: Optional[ModelConfig] = None,
+        embedder_config: Optional[ModelConfig] = None,
     ):
         """Initialize TemplateStore
         
@@ -44,12 +44,12 @@ class TemplateStore:
             postgres_config: PostgreSQL connection configuration
             template_schema: Schema name for template tables (default: "wisbi")
             embedding_dim: Embedding vector dimension (default: 768)
-            llm_config: LLM config for generating embeddings (optional)
+            embedder_config: Embedder config for generating embeddings (optional)
         """
         self.postgres_config = postgres_config
         self.template_schema = template_schema
         self.embedding_dim = embedding_dim
-        self.llm_config = llm_config
+        self.embedder_config = embedder_config
         self.logger = logging.getLogger(__name__)
         self._adapter: Optional[PostgreSQLAdapter] = None
     
@@ -59,7 +59,7 @@ class TemplateStore:
         postgres_config: PostgreSQLConfig,
         template_schema: str = "wisbi",
         embedding_dim: int = 768,
-        llm_config: Optional[ModelConfig] = None,
+        embedder_config: Optional[ModelConfig] = None,
         auto_init_tables: bool = True,
     ) -> "TemplateStore":
         """Initialize TemplateStore instance and auto-setup tables
@@ -71,13 +71,13 @@ class TemplateStore:
             postgres_config: PostgreSQL connection configuration
             template_schema: Schema name for template tables (default: "wisbi")
             embedding_dim: Embedding vector dimension (default: 768)
-            llm_config: LLM config for generating embeddings (optional)
+            embedder_config: Embedder config for generating embeddings (optional)
             auto_init_tables: Whether to auto-check and create tables (default: True)
         
         Returns:
             TemplateStore: Initialized instance
         """
-        store = cls(postgres_config, template_schema, embedding_dim, llm_config)
+        store = cls(postgres_config, template_schema, embedding_dim, embedder_config)
         
         if auto_init_tables:
             table_exists = await store.check_table_exists()
@@ -217,35 +217,6 @@ class TemplateStore:
         }
         return json.dumps(normalized, sort_keys=True, ensure_ascii=False)
     
-    async def _generate_embedding(self, text: str) -> List[float]:
-        """Generate embedding vector for text
-        
-        Args:
-            text: Text to generate embedding for
-            
-        Returns:
-            List[float]: Embedding vector
-            
-        Raises:
-            RuntimeError: If llm_config not provided
-        """
-        if self.llm_config is None:
-            raise RuntimeError(
-                "LLM config not provided. Please initialize TemplateStore with llm_config "
-                "or use insert_template with pre-computed embeddings."
-            )
-        
-        try:
-            embedding = await aembed_text(self.llm_config, text)
-            return embedding
-        except Exception as e:
-            self.logger.exception(f"Error generating embedding: {e}")
-            raise
-    
-    # ============================================================================
-    # Insert template
-    # ============================================================================
-    
     async def insert_template(
         self,
         template: Template,
@@ -279,7 +250,7 @@ class TemplateStore:
             components_text = self._components_to_text(components)
             
             # Generate embedding
-            embedding = await self._generate_embedding(components_text)
+            embedding = await aembed_text(self.embedder_config, components_text)
             
             # Prepare data
             metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
@@ -356,7 +327,7 @@ class TemplateStore:
             
             # Convert components to text and generate embedding
             components_text = self._components_to_text(components)
-            query_embedding = await self._generate_embedding(components_text)
+            query_embedding = await aembed_text(self.embedder_config, components_text)
             embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
             
             # Use cosine similarity for vector search
