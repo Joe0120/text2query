@@ -1,55 +1,65 @@
 """
-Text-to-SQL/Query converter using LlamaIndex LLM
+Text-to-SQL/Query converter using HTTP request-based LLM calls
 """
 
-from typing import Optional, Any
+from typing import Optional, Any, List, Dict
 import re
 import logging
 
 
 class Text2SQL:
     """
-    Convert natural language questions to database queries using LlamaIndex LLM
+    Convert natural language questions to database queries using HTTP request-based LLM calls
 
-    This class is designed to work with user-provided LlamaIndex LLM instances,
-    making it flexible and allowing users to control their own LLM configuration.
+    This class uses ModelConfig and direct HTTP requests instead of LlamaIndex,
+    making it more flexible and provider-agnostic.
     """
 
     def __init__(
         self,
-        llm: Any,
+        llm_config: Any,
         db_structure: str,
-        chat_history: Optional[Any] = None,
+        chat_history: Optional[List[Dict[str, str]]] = None,
         db_type: str = "postgresql"
     ):
         """
         Initialize Text2SQL converter
 
         Args:
-            llm: LlamaIndex LLM instance (e.g., OpenAI, Anthropic, etc.)
+            llm_config: ModelConfig instance (from core.utils.model_configs)
             db_structure: Database structure information string
                          (from adapter.get_schema_str())
-            chat_history: Optional ChatMemoryBuffer.memory for conversation context
-            db_type: Database type (postgresql, mysql, mongodb, sqlite)
+            chat_history: Optional list of chat messages in format
+                         [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+            db_type: Database type (postgresql, mysql, mongodb, sqlite, sqlserver, oracle)
 
         Example:
-            >>> from llama_index.llms.openai import OpenAI
+            >>> from text2query.core.utils.model_configs import ModelConfig
             >>> from text2query.core.t2s import Text2SQL
             >>>
-            >>> llm = OpenAI(model="gpt-4", api_key="your-key")
+            >>> llm_config = ModelConfig(
+            ...     base_url="http://localhost:11434",
+            ...     endpoint="/api/chat",
+            ...     api_key="",
+            ...     model_name="gemma3:1b",
+            ...     provider="ollama"
+            ... )
             >>> db_structure = await adapter.get_schema_str()
-            >>> t2s = Text2SQL(llm=llm, db_structure=db_structure, db_type="mongodb")
+            >>> t2s = Text2SQL(llm_config=llm_config, db_structure=db_structure, db_type="mongodb")
             >>> query = await t2s.generate_query("每個部門有多少經理？")
         """
-        self.llm = llm
+        self.llm_config = llm_config
         self.db_structure = db_structure
-        self.chat_history = chat_history
+        self.chat_history = chat_history or []
         self.db_type = db_type.lower()
         self.logger = logging.getLogger("text2query.t2s")
 
-        # Import prompt builder
+        # Import prompt builder and model utilities
         from ..llm.prompt_builder import PromptBuilder
+        from .utils.models import agenerate_chat
+        
         self.prompt_builder = PromptBuilder()
+        self.agenerate_chat = agenerate_chat
 
     async def generate_query(
         self,
@@ -99,13 +109,18 @@ class Text2SQL:
 
             self.logger.info(f"Generating query for question: {question[:50]}..., with Prompt: {prompt[:100]}...")
 
-            # Always use non-streaming mode for clean async execution
+            # Generate query using request-based approach
             generated_query = await self._generate_without_streaming(prompt)
 
             # Clean up the response
             generated_query = self._clean_query_response(generated_query)
 
             self.logger.info(f"Generated query: {generated_query}...")
+
+            # Update chat history with this interaction
+            if include_history:
+                self.chat_history.append({"role": "user", "content": question})
+                self.chat_history.append({"role": "assistant", "content": generated_query})
 
             return generated_query
 
@@ -120,6 +135,9 @@ class Text2SQL:
     ) -> str:
         """
         Generate query with streaming output (shows thinking process)
+        
+        Note: Streaming is not currently supported in the request-based approach.
+        This method falls back to non-streaming mode.
 
         Args:
             prompt: The prompt to send to LLM
@@ -128,76 +146,26 @@ class Text2SQL:
         Returns:
             Complete generated query string
         """
-        from llama_index.core.llms import ChatMessage
-
-        # Prepare chat message
-        messages = [ChatMessage(role="user", content=prompt)]
-
-        # Stream the response
+        self.logger.warning("Streaming not supported in request-based approach, using non-streaming mode")
+        
         if show_thinking:
             print("\n🤔 LLM 思考過程:")
             print("-" * 60)
 
-        full_response = ""
-
         try:
-            # Use stream_chat for streaming response
-            response_stream = await self.llm.astream_chat(messages)
-
-            async for chunk in response_stream:
-                # Try different ways to get the content from chunk
-                chunk_text = None
-                
-                # Method 1: Try delta attribute (for some LLMs)
-                if hasattr(chunk, 'delta') and chunk.delta:
-                    chunk_text = chunk.delta
-                # Method 2: Try message.content (for complete chunks)
-                elif hasattr(chunk, 'message') and hasattr(chunk.message, 'content'):
-                    # For complete message chunks, we need to get the delta
-                    # by comparing with previous response
-                    if full_response:
-                        chunk_text = chunk.message.content[len(full_response):]
-                    else:
-                        chunk_text = chunk.message.content
-                # Method 3: Direct content attribute
-                elif hasattr(chunk, 'content') and chunk.content:
-                    chunk_text = chunk.content
-                # Method 4: String representation
-                else:
-                    chunk_text = str(chunk)
-                
-                if chunk_text:
-                    full_response += chunk_text
-                    if show_thinking:
-                        print(chunk_text, end="", flush=True)
-
+            response = await self._generate_without_streaming(prompt)
+            
             if show_thinking:
+                print(response)
                 print("\n" + "-" * 60)
                 print("✅ 思考完成\n")
-
+            
+            return response
         except Exception as e:
-            # Catch all exceptions and try non-streaming fallback
-            error_msg = str(e)
-            self.logger.warning(f"Streaming failed ({type(e).__name__}: {error_msg}), trying non-streaming")
-            
+            self.logger.error(f"Query generation failed: {e}")
             if show_thinking:
-                print(f"\n⚠️  串流模式失敗，切換到一般模式...")
-                print("-" * 60)
-            
-            try:
-                # Fallback: try non-streaming
-                response = await self.llm.achat(messages)
-                full_response = response.message.content
-                if show_thinking:
-                    print(full_response)
-                    print("\n" + "-" * 60)
-                    print("✅ 思考完成\n")
-            except Exception as fallback_e:
-                # If even non-streaming fails, raise the original error
-                self.logger.error(f"Both streaming and non-streaming failed. Original error: {e}")
-                raise e
-
-        return full_response
+                print(f"\n❌ 生成失敗: {e}\n")
+            raise
 
     async def _generate_without_streaming(self, prompt: str) -> str:
         """
@@ -209,19 +177,17 @@ class Text2SQL:
         Returns:
             Generated query string
         """
-        from llama_index.core.llms import ChatMessage
+        # Prepare chat message in request format
+        messages = [{"role": "user", "content": prompt}]
 
-        # Prepare chat message
-        messages = [ChatMessage(role="user", content=prompt)]
+        # Call LLM using request-based approach
+        response = await self.agenerate_chat(self.llm_config, messages)
 
-        # Call LLM in chat mode
-        response = await self.llm.achat(messages)
-
-        return response.message.content
+        return response
 
     def _format_chat_history(self) -> str:
         """
-        Format chat history from ChatMemoryBuffer.memory format
+        Format chat history from message list format
 
         Returns:
             Formatted chat history string
@@ -231,20 +197,15 @@ class Text2SQL:
 
         history_lines = []
         try:
-            # ChatMemoryBuffer.memory is typically a list of messages
-            if hasattr(self.chat_history, 'get_all'):
-                messages = self.chat_history.get_all()
-            elif isinstance(self.chat_history, list):
-                messages = self.chat_history
-            else:
-                return ""
-
-            for msg in messages:
-                role = getattr(msg, 'role', 'unknown')
-                content = getattr(msg, 'content', str(msg))
+            # Format last 10 messages (5 exchanges)
+            recent_history = self.chat_history[-10:] if len(self.chat_history) > 10 else self.chat_history
+            
+            for msg in recent_history:
+                role = msg.get("role", "unknown")
+                content = msg.get("content", str(msg))
                 history_lines.append(f"{role}: {content}")
 
-            return "\n".join(history_lines[-10:])  # Last 10 messages
+            return "\n".join(history_lines)
 
         except Exception as e:
             self.logger.warning(f"Failed to format chat history: {e}")
@@ -285,14 +246,15 @@ class Text2SQL:
         self.db_structure = db_structure
         self.logger.info("Database structure updated")
 
-    def update_chat_history(self, chat_history: Any) -> None:
+    def update_chat_history(self, chat_history: Optional[List[Dict[str, str]]]) -> None:
         """
         Update chat history
 
         Args:
-            chat_history: New chat history (ChatMemoryBuffer.memory format)
+            chat_history: New chat history as list of message dicts
+                         Format: [{"role": "user", "content": "..."}, ...]
         """
-        self.chat_history = chat_history
+        self.chat_history = chat_history or []
         self.logger.info("Chat history updated")
 
     def set_db_type(self, db_type: str) -> None:
@@ -300,7 +262,7 @@ class Text2SQL:
         Change database type
 
         Args:
-            db_type: New database type (postgresql, mysql, mongodb, sqlite)
+            db_type: New database type (postgresql, mysql, mongodb, sqlite, sqlserver, oracle)
         """
         self.db_type = db_type.lower()
         self.logger.info(f"Database type changed to: {self.db_type}")
@@ -324,7 +286,9 @@ class Text2SQL:
         """
         return {
             "db_type": self.db_type,
-            "has_chat_history": self.chat_history is not None,
+            "has_chat_history": len(self.chat_history) > 0,
+            "chat_history_length": len(self.chat_history),
             "db_structure_length": len(self.db_structure),
-            "llm_type": type(self.llm).__name__
+            "llm_provider": self.llm_config.provider if hasattr(self.llm_config, 'provider') else "unknown",
+            "llm_model": self.llm_config.model_name if hasattr(self.llm_config, 'model_name') else "unknown"
         }
