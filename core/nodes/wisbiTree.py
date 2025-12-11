@@ -25,13 +25,15 @@ class WisbiWorkflow:
     
     Flow:
     1. memory_retrieve_node → orchestrator_node (retrieves conversation context first)
-    2. orchestrator_node → routes to (trainer_node/template_node/clarify_node/executor_node)
-    3. After trainer/template → reroute_based_on_confidence → (orchestrator for next node OR executor_node)
-       - Training is priority first, template is fallback
-    4. executor_node → memory_save_node (saves conversation after execution)
-    5. memory_save_node → need_human_approval → (human_explanation_node OR END)
-    6. clarify_node → human_explanation_node → (gets explanation) → orchestrator_node (restart workflow)
-    7. human_explanation_node → executor_node (if approved) OR END (if rejected)
+    2. orchestrator_node → trainer_node (training is priority first)
+    3. trainer_node → (if score not high or training is empty) → template_node
+                    → (otherwise) → executor_node
+    4. template_node → (if score is low) → clarify_node → executor_node
+                    → (otherwise) → executor_node
+    5. clarify_node → executor_node (currently does nothing, just passes through)
+    6. executor_node → memory_save_node (saves conversation after execution)
+    7. memory_save_node → need_human_approval → (human_explanation_node OR END)
+    8. human_explanation_node → executor_node (if approved) OR END (if rejected)
     
     Usage:
         workflow = WisbiWorkflow(
@@ -150,8 +152,8 @@ class WisbiWorkflow:
             return state
         
         async def default_clarify_node(state: WisbiState) -> WisbiState:
-            """Default clarify node - sets flag to request human explanation"""
-            state["clarification_requested"] = True
+            """Default clarify node - does nothing, just returns state"""
+            # Currently does nothing, just passes through to executor_node
             return state
         
         executor = self.executor_node if self.executor_node else default_executor_node
@@ -209,25 +211,28 @@ class WisbiWorkflow:
             }
         )
         
+        # After trainer_node: if score not high or training is empty -> template_node, else -> executor_node
         workflow.add_conditional_edges(
             "trainer_node",
             reroute_based_on_confidence,
             {
-                "orchestrator": "orchestrator",
+                "template_node": "template_node",
                 "executor_node": "executor_node",
             }
         )
         
+        # After template_node: if score is low -> clarify_node, else -> executor_node
         workflow.add_conditional_edges(
             "template_node",
             reroute_based_on_confidence,
             {
-                "orchestrator": "orchestrator",
+                "clarify_node": "clarify_node",
                 "executor_node": "executor_node",
             }
         )
         
-        workflow.add_edge("clarify_node", "human_explanation_node")
+        # clarify_node does nothing and routes directly to executor_node
+        workflow.add_edge("clarify_node", "executor_node")
         
         workflow.add_edge("executor_node", "memory_save_node")
         

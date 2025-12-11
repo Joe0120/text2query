@@ -26,66 +26,54 @@ def orchestrator_node(state: WisbiState) -> WisbiState:
     
     return state
 
-def reroute_based_on_confidence(state: WisbiState) -> Literal["orchestrator", "executor_node"]:
+def reroute_based_on_confidence(state: WisbiState) -> Literal["template_node", "clarify_node", "executor_node"]:
     """
     Evaluates confidence from the current node and determines next route.
-    Returns either "orchestrator" to try the next node, or "executor_node" to proceed.
     
-    Flow: After a node (trainer/template) executes, this function checks
-    confidence. If below threshold, routes back to orchestrator to try next node.
-    Otherwise, routes to executor.
+    Flow:
+    - After trainer_node: if score not high or training is empty → template_node, else → executor_node
+    - After template_node: if score is low → clarify_node, else → executor_node
     
     Training is priority first, template is fallback.
     """
-    reroute = False
     current = state.get("current_move")
     
     if current == "trainer":
-        # Check if trainer found good results
         search_results = state.get("search_results")
+        training_score = state.get("training_score")
+        
         if search_results is None or search_results == "":
-            # No results found, try template next
-            reroute = True
-        else:
-            # Trainer found results, proceed to executor
-            reroute = False
-    elif current == "template":
-        # Template is the fallback after trainer
-        template_score = state.get("template_score")
-        if template_score is None:
-            # If score not set, assume low confidence and proceed to executor anyway
-            reroute = False
-        else:
-            reroute = template_score < 0.5
-    else:
-        # Unknown move, default to executor
+            state["current_move"] = "template"
+            return "template_node"
+        
+        if training_score is not None and training_score < 0.7:
+            state["current_move"] = "template"
+            return "template_node"
+        
         state["current_move"] = "executor"
         return "executor_node"
-
-    route_order = {"trainer": 0, "template": 1}
-    routes = ["trainer", "template"]
-
-    if reroute:
-        current_idx = route_order.get(current, -1)
-        if current_idx >= 0 and current_idx < len(routes) - 1:
-            # Route to next node in sequence
-            next_route = routes[current_idx + 1]
-            state["current_move"] = next_route
-            return "orchestrator"  # Go back to orchestrator to handle next node
-        else:
-            # Already at last route, proceed to executor
-            state["current_move"] = "executor"
-            return "executor_node"
+        
+    elif current == "template":
+        template_score = state.get("template_score")
+        
+        if template_score is None:
+            state["current_move"] = "clarify"
+            return "clarify_node"
+        
+        if template_score < 0.5:
+            state["current_move"] = "clarify"
+            return "clarify_node"
+        
+        state["current_move"] = "executor"
+        return "executor_node"
     else:
-        # Confidence is high enough, proceed to executor
         state["current_move"] = "executor"
         return "executor_node"
         
 
 def route_by_current_move(state: WisbiState) -> Literal["template_node", "trainer_node", "clarify_node", "executor_node"]:
     """
-    Conditional edge function that routes from orchestrator to the appropriate node
-    based on current_move in state.
+    Routes from orchestrator to the appropriate node based on current_move in state.
     """
     current_move = state.get("current_move")
     
@@ -97,6 +85,3 @@ def route_by_current_move(state: WisbiState) -> Literal["template_node", "traine
         return "clarify_node"
     elif current_move == "executor":
         return "executor_node"
-    else:
-        # Default to trainer if current_move is None or invalid (training is priority first)
-        return "trainer_node"
