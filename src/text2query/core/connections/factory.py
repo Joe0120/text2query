@@ -8,6 +8,9 @@ from .postgresql import PostgreSQLConfig
 from .mysql import MySQLConfig
 from .mongodb import MongoDBConfig
 from .sqlite import SQLiteConfig
+from .sqlserver import SQLServerConfig
+from .oracle import OracleConfig
+from .trino import TrinoConfig
 
 
 def create_connection_config(db_type: str, **kwargs) -> BaseConnectionConfig:
@@ -15,7 +18,7 @@ def create_connection_config(db_type: str, **kwargs) -> BaseConnectionConfig:
     Factory function to create appropriate connection configuration
     
     Args:
-        db_type: Database type (postgresql, mysql, mongodb, sqlite)
+        db_type: Database type (postgresql, mysql, mongodb, sqlite, sqlserver, oracle, trino)
         **kwargs: Configuration parameters
         
     Returns:
@@ -25,7 +28,10 @@ def create_connection_config(db_type: str, **kwargs) -> BaseConnectionConfig:
         "postgresql": PostgreSQLConfig,
         "mysql": MySQLConfig,
         "mongodb": MongoDBConfig,
-        "sqlite": SQLiteConfig
+        "sqlite": SQLiteConfig,
+        "sqlserver": SQLServerConfig,
+        "oracle": OracleConfig,
+        "trino": TrinoConfig
     }
     
     if db_type not in config_map:
@@ -73,7 +79,8 @@ def load_config_from_url(connection_url: str) -> BaseConnectionConfig:
         "mysql": "mysql",
         "mongodb": "mongodb",
         "mongo": "mongodb",
-        "sqlite": "sqlite"
+        "sqlite": "sqlite",
+        "trino": "trino"
     }
     
     if parsed.scheme not in scheme_map:
