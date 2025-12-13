@@ -123,7 +123,9 @@ class PromptBuilder:
         question: str,
         db_structure: str,
         db_type: str = "postgresql",
-        chat_history: Optional[str] = None
+        chat_history: Optional[str] = None,
+        training_context: Optional[str] = None,
+        additional_context: Optional[str] = None,
     ) -> str:
         """
         Build prompt for LLM
@@ -158,6 +160,21 @@ class PromptBuilder:
         # Add chat history if provided
         if chat_history:
             prompt = f"對話歷史：\n{chat_history}\n\n{prompt}"
+
+        # Add retrieved training context if provided
+        if training_context:
+            prompt = (
+                f"{prompt}\n\n"
+                f"以下是關於這些資料表的額外說明。它們可能會出現在「問題與 SQL 配對」、「文件說明」以及「常用 SQL」中，請將它們作為參考依據使用：\n"
+                f"{training_context}"
+            )
+
+        if additional_context:
+            prompt = (
+                f"{prompt}\n\n"
+                f"以下是根據使用者問題所產生的 SQL 查詢範例提示。"
+                f"{additional_context}"
+            )
 
         return prompt
 

@@ -182,6 +182,85 @@ class TrainingStore:
         except Exception as e:
             self.logger.exception(f"Error setting up training tables: {e}")
             return False
+
+    # IMPORTANT: THIS IS TEMPORARY, LATER CHANGE TO A RE-EMBED OLD CONTENT
+    async def _get_existing_embedding_dim(self) -> Optional[int]:
+        """Detect current embedding vector dimension from existing tables.
+
+        Returns None if tables/column not found or cannot be parsed.
+        """
+        try:
+            adapter = self._get_adapter()
+            # Use pg_catalog to read the type modifier for the embedding column
+            query = f"""
+                SELECT format_type(a.atttypid, a.atttypmod) AS type_repr
+                FROM pg_attribute a
+                WHERE a.attrelid = '{self.training_schema}.qna'::regclass
+                  AND a.attname = 'embedding'
+                  AND a.attnum > 0
+                  AND NOT a.attisdropped
+            """
+            result = await adapter.sql_execution(query, safe=False, limit=None)
+            if not result.get("success"):
+                return None
+            rows = result.get("result") or []
+            if not rows:
+                return None
+            type_repr = rows[0][0] or ""
+            # Expect 'vector(XXXX)'
+            import re
+            m = re.search(r"vector\((\d+)\)", str(type_repr))
+            if m:
+                return int(m.group(1))
+            return None
+        except Exception:
+            return None
+
+    # IMPORTANT: THIS IS TEMPORARY, LATER CHANGE TO A RE-EMBED OLD CONTENT
+    async def drop_training_tables(self) -> bool:
+        """Drop training tables if they exist (non-fatal if they don't)."""
+        try:
+            adapter = self._get_adapter()
+            drop_sql = f"""
+                DROP TABLE IF EXISTS {self.training_schema}.qna CASCADE;
+                DROP TABLE IF EXISTS {self.training_schema}.sql_examples CASCADE;
+                DROP TABLE IF EXISTS {self.training_schema}.documentation CASCADE;
+            """
+            result = await adapter.sql_execution(drop_sql, safe=False, limit=None)
+            return bool(result.get("success"))
+        except Exception as e:
+            self.logger.exception(f"Error dropping training tables: {e}")
+            return False
+
+    # IMPORTANT: THIS IS TEMPORARY, LATER CHANGE TO A RE-EMBED OLD CONTENT
+    async def reinit_if_dim_mismatch(self) -> bool:
+        """Ensure table embedding dimension matches configured embedding_dim.
+
+        If a mismatch is detected, drops existing tables and re-creates them
+        with the configured embedding_dim.
+        """
+        try:
+            tables_exist = await self.check_tables_exist()
+            if not any(tables_exist.values()):
+                return await self.init_training_tables()
+
+            existing_dim = await self._get_existing_embedding_dim()
+            if existing_dim is None or existing_dim == self.embedding_dim:
+                return True
+
+            self.logger.warning(
+                "Embedding dimension mismatch detected (existing=%s, desired=%s). Reinitializing tables...",
+                existing_dim,
+                self.embedding_dim,
+            )
+            dropped = await self.drop_training_tables()
+            if not dropped:
+                self.logger.error("Failed to drop existing training tables for reinit")
+                return False
+            return await self.init_training_tables()
+        except Exception as e:
+            self.logger.exception(f"Error checking/reinitializing embedding dim: {e}")
+            return False
     
     async def check_tables_exist(self) -> Dict[str, bool]:
         """檢查 RAG training 表是否存在
@@ -483,24 +562,34 @@ class TrainingStore:
             # 準備 metadata（確保是 JSON 格式）
             md = metadata or {}
             metadata_json = json.dumps(md, ensure_ascii=False)
-            
-            # 將 embedding 轉換為字串格式
+
+            # 將 embedding 轉換為字串格式（pgvector 文字表示）
             embedding_str = '[' + ','.join(map(str, embedding)) + ']'
-            
-            # 構建 INSERT SQL
-            # 注意：使用 $$ 符號包圍文字以避免 SQL injection
+
+            # 使用參數化查詢避免字串拼接錯誤
             insert_sql = f"""
                 INSERT INTO {self.training_schema}.qna (
                     user_id, group_id, table_id,
                     question, answer_sql, embedding, metadata, is_active
                 ) VALUES (
-                    '{user_id}', '{group_id}', '{table_id}',
-                    $${question}$$, $${answer_sql}$$, '{embedding_str}'::vector, '{metadata_json}'::jsonb, {is_active}
+                    $1, $2, $3,
+                    $4, $5, $6::vector, $7::jsonb, $8
                 )
                 RETURNING id
             """
-            
-            result = await adapter.sql_execution(insert_sql, safe=False, limit=None)
+
+            params = (
+                user_id,
+                group_id,
+                table_id,
+                question,
+                answer_sql,
+                embedding_str,
+                metadata_json,
+                is_active,
+            )
+
+            result = await adapter.sql_execution(insert_sql, params=params, safe=False, limit=None)
             
             if result.get("success") and result.get("result"):
                 inserted_id = result["result"][0][0]
@@ -546,19 +635,29 @@ class TrainingStore:
             md = metadata or {}
             metadata_json = json.dumps(md, ensure_ascii=False)
             embedding_str = '[' + ','.join(map(str, embedding)) + ']'
-            
+
             insert_sql = f"""
                 INSERT INTO {self.training_schema}.sql_examples (
                     user_id, group_id, table_id,
                     content, embedding, metadata, is_active
                 ) VALUES (
-                    '{user_id}', '{group_id}', '{table_id}',
-                    $${content}$$, '{embedding_str}'::vector, '{metadata_json}'::jsonb, {is_active}
+                    $1, $2, $3,
+                    $4, $5::vector, $6::jsonb, $7
                 )
                 RETURNING id
             """
-            
-            result = await adapter.sql_execution(insert_sql, safe=False, limit=None)
+
+            params = (
+                user_id,
+                group_id,
+                table_id,
+                content,
+                embedding_str,
+                metadata_json,
+                is_active,
+            )
+
+            result = await adapter.sql_execution(insert_sql, params=params, safe=False, limit=None)
             
             if result.get("success") and result.get("result"):
                 inserted_id = result["result"][0][0]
@@ -606,22 +705,30 @@ class TrainingStore:
             md = metadata or {}
             metadata_json = json.dumps(md, ensure_ascii=False)
             embedding_str = '[' + ','.join(map(str, embedding)) + ']'
-            
-            # 處理 title（可能為 NULL）
-            title_sql = f"$${title}$$" if title else "NULL"
-            
+
             insert_sql = f"""
                 INSERT INTO {self.training_schema}.documentation (
                     user_id, group_id, table_id,
                     title, content, embedding, metadata, is_active
                 ) VALUES (
-                    '{user_id}', '{group_id}', '{table_id}',
-                    {title_sql}, $${content}$$, '{embedding_str}'::vector, '{metadata_json}'::jsonb, {is_active}
+                    $1, $2, $3,
+                    $4, $5, $6::vector, $7::jsonb, $8
                 )
                 RETURNING id
             """
-            
-            result = await adapter.sql_execution(insert_sql, safe=False, limit=None)
+
+            params = (
+                user_id,
+                group_id,
+                table_id,
+                title,
+                content,
+                embedding_str,
+                metadata_json,
+                is_active,
+            )
+
+            result = await adapter.sql_execution(insert_sql, params=params, safe=False, limit=None)
             
             if result.get("success") and result.get("result"):
                 inserted_id = result["result"][0][0]
@@ -1034,6 +1141,93 @@ class TrainingStore:
             "sql_examples": sql_results,
             "documentation": doc_results,
         }
+    
+    # ============================================================================
+    # DELETE 方法 
+    # ============================================================================
+    async def delete_item(
+        self,
+        *,
+        type: str,
+        table_id: str,
+        user_id: Optional[str] = None,
+        group_id: Optional[str] = None,
+        question: Optional[str] = None,
+        answer_sql: Optional[str] = None,
+        content: Optional[str] = None,
+        title: Optional[str] = None,
+    ) -> int:
+        """Delete training item(s) by available fields only.
+        
+        Uses existing columns: table_id, user_id, group_id, question, answer_sql, content, title.
+        Text comparisons are exact matches.
+        
+        Args:
+            type: One of "qna", "sql_example", "documentation"
+            table_id: Scope to the datasource/table
+            user_id: Optional scope
+            group_id: Optional scope
+            question: For qna rows (optional but recommended)
+            answer_sql: For qna rows (optional but recommended)
+            content: For sql_example/documentation rows
+            title: For documentation rows (optional)
+        
+        Returns:
+            int: number of deleted rows
+        """
+        try:
+            adapter = self._get_adapter()
+            if type == "qna":
+                tbl = "qna"
+            elif type == "sql_example":
+                tbl = "sql_examples"
+            elif type == "documentation":
+                tbl = "documentation"
+            else:
+                raise ValueError(f"Unsupported type: {type}")
+
+            where_clauses: List[str] = ["table_id = '{}'".format(table_id)]
+            if user_id is not None and user_id != "":
+                where_clauses.append("user_id = '{}'".format(user_id))
+            if group_id is not None and group_id != "":
+                where_clauses.append("group_id = '{}'".format(group_id))
+
+            if tbl == "qna":
+                if question:
+                    where_clauses.append("question = $${}$$".format(question))
+                if answer_sql:
+                    where_clauses.append("answer_sql = $${}$$".format(answer_sql))
+            elif tbl == "sql_examples":
+                if content:
+                    where_clauses.append("content = $${}$$".format(content))
+            else:  # documentation
+                if content:
+                    where_clauses.append("content = $${}$$".format(content))
+                if title:
+                    where_clauses.append("title = $${}$$".format(title))
+
+            where_sql = " AND ".join(where_clauses)
+            delete_sql = f"""
+                DELETE FROM {self.training_schema}.{tbl}
+                WHERE {where_sql}
+                RETURNING id
+            """
+
+            result = await adapter.sql_execution(delete_sql, safe=False, limit=None)
+            if result.get("success"):
+                rows = result.get("result", []) or []
+                deleted = len(rows)
+                self.logger.info(
+                    f"Deleted {deleted} row(s) from {self.training_schema}.{tbl} by fields"
+                )
+                return deleted
+            else:
+                error_msg = result.get("error", "Unknown error")
+                self.logger.error(f"Failed to delete by fields: {error_msg}")
+                return 0
+        except Exception as e:
+            self.logger.exception(f"Error deleting by fields: {e}")
+            return 0
     
     # ============================================================================
     # 連線管理
