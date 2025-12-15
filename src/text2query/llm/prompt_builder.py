@@ -75,6 +75,28 @@ class PromptBuilder:
 - 使用雙引號 "" 來引用標識符
 - 只返回 SQL 語句，不要任何其他解釋或格式標記。"""
 
+    TRINO_TEMPLATE = """你是一個 Trino 分散式 SQL 查詢專家。Trino 是一個能夠跨多個數據源（PostgreSQL、MongoDB、MySQL 等）進行查詢的分散式 SQL 引擎。
+
+根據以下數據庫結構和用戶問題，生成相應的 SQL 查詢語句。
+
+數據庫結構：
+{db_structure}
+
+用戶問題：{question}
+
+請生成對應的 SQL 查詢語句。注意 Trino 的特性：
+- 跨數據源查詢時使用完整路徑：catalog.schema.table（例如：postgresql.public.employees）
+- 支援標準 SQL 語法
+- 可以在同一個查詢中 JOIN 不同 catalog 的表（例如：postgresql 的表和 mongodb 的表）
+- 使用 LIMIT N 來限制結果
+- 使用雙引號 "" 來引用標識符
+- 只返回 SQL 語句，不要任何其他解釋或格式標記。
+
+範例格式：
+- 單表查詢：SELECT * FROM postgresql.public.employees WHERE salary > 50000
+- 跨數據源查詢：SELECT e.name, s.amount FROM postgresql.public.employees e JOIN mongodb.hr.salaries s ON e.employee_id = s.employee_id
+- 聚合查詢：SELECT department, COUNT(*) as count FROM postgresql.public.employees GROUP BY department"""
+
     def __init__(self, custom_templates: Optional[Dict[str, str]] = None):
         """
         Initialize prompt builder
@@ -90,6 +112,7 @@ class PromptBuilder:
             "sqlite": self.SQLITE_TEMPLATE,
             "sqlserver": self.SQLSERVER_TEMPLATE,
             "oracle": self.ORACLE_TEMPLATE,
+            "trino": self.TRINO_TEMPLATE,
         }
 
         if custom_templates:
