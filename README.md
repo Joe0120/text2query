@@ -1,164 +1,150 @@
 # text2query
 
-A Python library that converts natural language queries to database queries. Supports SQL databases (PostgreSQL, MySQL, SQLite, SQL Server, Oracle, Trino) and NoSQL databases (MongoDB) with async execution.
+A Python library that converts natural language queries to database queries using LLM. Supports SQL databases (PostgreSQL, MySQL, SQLite, SQL Server, Oracle) and NoSQL databases (MongoDB) with async execution.
 
 ## Installation
 
 ```bash
-# From Git URL
-pip install "text2query @ git+https://your-repo-url@0.0.1"
+pip install "text2query[all-db,openai]"
 
-# Local development
-pip install -e ".[dev]"
+# Or install specific database drivers
+pip install "text2query[postgresql-sync,openai]"
+pip install "text2query[mysql,openai]"
+pip install "text2query[mongodb,openai]"
 ```
 
 ## Quick Start
 
-### Basic Usage
+### 1. Create Config from Connection URL
+
+```python
+from text2query.core.connections import load_config_from_url
+from text2query.adapters import create_adapter
+
+# Automatically detect database type from URL
+config = load_config_from_url("postgresql://user:pass@localhost:5432/mydb?schema=public")
+adapter = create_adapter(config)  # Auto-creates PostgreSQLAdapter
+```
+
+Supported URL schemes:
+
+| Database | Schemes |
+|----------|---------|
+| PostgreSQL | `postgresql://`, `postgres://` |
+| MySQL | `mysql://` |
+| MongoDB | `mongodb://`, `mongo://` |
+| SQLite | `sqlite:///` |
+| SQL Server | `sqlserver://`, `mssql://` |
+| Oracle | `oracle://` |
+
+### 2. Natural Language to SQL
 
 ```python
 import asyncio
-from text2query import QueryComposer, Text2SQL
-from text2query.core.connections import PostgreSQLConfig
-from text2query.adapters.sql.postgresql import PostgreSQLAdapter
+from llama_index.llms.openai import OpenAI
+from text2query.core.connections import load_config_from_url
+from text2query.adapters import create_adapter
+from text2query.core.t2s import Text2SQL
 
 async def main():
-    # Configure connection
-    config = PostgreSQLConfig(
-        host="localhost",
-        port=5432,
-        database_name="mydb",
-        username="user",
-        password="password"
-    )
+    # Setup
+    config = load_config_from_url("postgresql://user:pass@localhost:5432/mydb")
+    adapter = create_adapter(config)
 
-    # Create adapter and execute query
-    adapter = PostgreSQLAdapter(config)
-    result = await adapter.sql_execution("SELECT * FROM users LIMIT 10")
+    # Get database schema
+    schema_str = await adapter.get_schema_str()
 
+    # Initialize LLM and Text2SQL
+    llm = OpenAI(model="gpt-4o-mini", api_key="your-api-key")
+    t2s = Text2SQL(llm=llm, db_structure=schema_str, db_type="postgresql")
+
+    # Generate SQL from natural language
+    sql = await t2s.generate_query("List all users older than 30")
+    print(sql)
+
+    # Execute query
+    result = await adapter.sql_execution(sql)
     if result["success"]:
-        for row in result["result"]:
-            print(row)
+        print(result["result"])
 
 asyncio.run(main())
 ```
 
-### Natural Language to SQL
+### 3. Generate Chart.js Visualization
 
 ```python
-from llama_index.llms.openai import OpenAI
-from text2query.core.t2s import Text2SQL
+from text2query.llm.chart_generator import ChartGenerator
 
-# Initialize LLM
-llm = OpenAI(model="gpt-4", temperature=0)
-
-# Create Text2SQL converter
-t2s = Text2SQL(
-    llm=llm,
-    db_structure=db_structure,
-    db_type="postgresql"
+chart_gen = ChartGenerator(llm=llm)
+chart_config = await chart_gen.generate_chart(
+    question="Sales by department",
+    sql_command=sql,
+    columns=result["columns"],
+    rows=result["result"]
 )
-
-# Generate SQL from natural language
-sql = await t2s.generate_query("Find all users older than 30")
-```
-
-### Cross-Database Query with Trino
-
-```python
-from text2query.core.connections import TrinoConfig
-from text2query.adapters.sql.trino import TrinoAdapter
-
-config = TrinoConfig(
-    host="localhost",
-    port=8080,
-    username="trino",
-    catalog="postgresql",
-    schema="public"
-)
-
-adapter = TrinoAdapter(config)
-
-# Query across PostgreSQL and MongoDB
-result = await adapter.sql_execution("""
-    SELECT e.name, e.department, s.salary
-    FROM postgresql.public.employees e
-    JOIN mongodb.hr.salaries s
-        ON CAST(e.employee_id AS VARCHAR) = s.employee_id
-    WHERE s.salary > 70000
-""")
+# Returns Chart.js configuration object
 ```
 
 ## Supported Databases
 
-| Database | Direct | Via Trino | Adapter |
-|----------|--------|-----------|---------|
-| PostgreSQL | Yes | Yes | `PostgreSQLAdapter` |
-| MySQL | Yes | Yes | `MySQLAdapter` |
-| MongoDB | Yes | Yes | `MongoDBAdapter` |
-| SQLite | Yes | No | `SQLiteAdapter` |
-| SQL Server | Yes | Yes | `SQLServerAdapter` |
-| Oracle | Yes | Yes | `OracleAdapter` |
-| Trino | - | Yes | `TrinoAdapter` |
-
-## Project Structure
-
-```
-text2query/
-├── src/
-│   └── text2query/
-│       ├── __init__.py
-│       ├── cli.py
-│       ├── exceptions.py
-│       ├── core/
-│       │   ├── connections/    # Database configs
-│       │   ├── query_composer.py
-│       │   └── t2s.py          # Text-to-SQL
-│       ├── adapters/
-│       │   ├── sql/            # SQL adapters
-│       │   └── nosql/          # NoSQL adapters
-│       ├── llm/
-│       └── utils/
-├── tests/
-├── docs/
-├── pyproject.toml
-└── README.md
-```
+| Database | Adapter | Config |
+|----------|---------|--------|
+| PostgreSQL | `PostgreSQLAdapter` | `PostgreSQLConfig` |
+| MySQL | `MySQLAdapter` | `MySQLConfig` |
+| MongoDB | `MongoDBAdapter` | `MongoDBConfig` |
+| SQLite | `SQLiteAdapter` | `SQLiteConfig` |
+| SQL Server | `SQLServerAdapter` | `SQLServerConfig` |
+| Oracle | `OracleAdapter` | `OracleConfig` |
 
 ## API Reference
 
-### Core Classes
-
-- **`QueryComposer`** - Main orchestration class for managing multiple database adapters
-- **`Text2SQL`** - Converts natural language to SQL using LLM
-- **`BaseQueryComposer`** - Base class for all database adapters
-
-### Connection Configs
+### Connection Configuration
 
 ```python
 from text2query.core.connections import (
+    load_config_from_url,      # Create config from URL string
+    load_config_from_dict,     # Create config from dictionary
+    create_connection_config,  # Create config by type name
     PostgreSQLConfig,
     MySQLConfig,
     MongoDBConfig,
     SQLiteConfig,
     SQLServerConfig,
     OracleConfig,
-    TrinoConfig,
 )
 ```
 
 ### Adapters
 
 ```python
-from text2query.adapters.sql import (
+from text2query.adapters import (
+    create_adapter,       # Auto-create adapter from config
     PostgreSQLAdapter,
     MySQLAdapter,
     SQLiteAdapter,
     SQLServerAdapter,
     OracleAdapter,
-    TrinoAdapter,
+    MongoDBAdapter,
 )
-from text2query.adapters.nosql import MongoDBAdapter
+```
+
+### Core Classes
+
+```python
+from text2query import (
+    Text2SQL,           # Natural language to SQL converter
+    QueryComposer,      # Query orchestration
+    Text2Query,         # Legacy class
+)
+
+from text2query.llm.chart_generator import ChartGenerator  # Chart.js generator
+from text2query.llm.prompt_builder import PromptBuilder    # Prompt templates
+```
+
+## CLI Usage
+
+```bash
+text2query "List all employees" -t sql -v
 ```
 
 ## Development
@@ -174,4 +160,3 @@ pytest tests/ -v
 black src/
 ruff check src/
 ```
-
