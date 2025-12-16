@@ -9,7 +9,6 @@ from .mongodb import MongoDBConfig
 from .sqlite import SQLiteConfig
 from .sqlserver import SQLServerConfig
 from .oracle import OracleConfig
-from .trino import TrinoConfig
 from .factory import (
     create_connection_config,
     load_config_from_dict,
@@ -19,12 +18,11 @@ from .factory import (
 __all__ = [
     "BaseConnectionConfig",
     "PostgreSQLConfig",
-    "MySQLConfig", 
+    "MySQLConfig",
     "MongoDBConfig",
     "SQLiteConfig",
     "SQLServerConfig",
     "OracleConfig",
-    "TrinoConfig",
     "create_connection_config",
     "load_config_from_dict",
     "load_config_from_url"
