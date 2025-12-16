@@ -24,6 +24,11 @@ class SQLiteAdapter(BaseQueryComposer):
     # 1. 初始化和基本屬性
     # ============================================================================
 
+    @property
+    def db_type(self) -> str:
+        """Return the database type identifier."""
+        return "sqlite"
+
     def __init__(self, config: Optional[BaseConnectionConfig] = None):
         super().__init__(config or SQLiteConfig())
         if not isinstance(self.config, SQLiteConfig):
@@ -103,9 +108,12 @@ class SQLiteAdapter(BaseQueryComposer):
             "metadata": execution["metadata"],
         }
 
-    async def _get_schema_info(self) -> Optional[Dict[str, Any]]:
+    async def _get_schema_info(self, tables: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
         """
         獲取資料庫 schema 信息（核心方法）
+
+        Args:
+            tables: 要獲取的表名列表，None 表示獲取所有表
 
         Returns:
             Optional[Dict]: 包含資料庫和表信息的字典
@@ -128,13 +136,15 @@ class SQLiteAdapter(BaseQueryComposer):
             loop = asyncio.get_event_loop()
 
         try:
-            schema_data = await loop.run_in_executor(None, self._fetch_schema_info_sync)
+            schema_data = await loop.run_in_executor(
+                None, self._fetch_schema_info_sync, tables
+            )
             return schema_data
         except Exception as error:
             self.logger.error("Failed to get schema info: %s", error)
             raise
 
-    def _fetch_schema_info_sync(self) -> Optional[Dict[str, Any]]:
+    def _fetch_schema_info_sync(self, tables: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
         """在執行器中同步獲取 schema 信息"""
         connection = sqlite3.connect(
             self.config.file_path,
@@ -154,13 +164,20 @@ class SQLiteAdapter(BaseQueryComposer):
                 ORDER BY name;
                 """
             )
-            tables = cursor.fetchall()
+            all_tables = cursor.fetchall()
 
-            if not tables:
+            if not all_tables:
                 return None
 
+            # 過濾表
+            if tables:
+                tables_set = set(tables)
+                all_tables = [(t,) for (t,) in all_tables if t in tables_set]
+                if not all_tables:
+                    return None
+
             tables_info = []
-            for (table_name,) in tables:
+            for (table_name,) in all_tables:
                 # 獲取列信息
                 cursor.execute(f"PRAGMA table_info({self._quote_identifier(table_name)});")
                 columns_raw = cursor.fetchall()
@@ -195,15 +212,18 @@ class SQLiteAdapter(BaseQueryComposer):
             cursor.close()
             connection.close()
 
-    async def get_schema_str(self) -> str:
+    async def get_schema_str(self, tables: Optional[List[str]] = None) -> str:
         """
         獲取 SQLite 資料庫的 SQL 結構字符串
+
+        Args:
+            tables: 要獲取的表名列表，None 表示獲取所有表
 
         Returns:
             str: 包含所有表結構的 CREATE TABLE 語句字符串
         """
         try:
-            schema_data = await self._get_schema_info()
+            schema_data = await self._get_schema_info(tables=tables)
             if not schema_data or not schema_data.get('tables'):
                 return ""
 
@@ -218,9 +238,12 @@ class SQLiteAdapter(BaseQueryComposer):
             self.logger.error("Failed to get SQL struct string: %s", error)
             return ""
 
-    async def get_schema_list(self) -> List[Dict[str, Any]]:
+    async def get_schema_list(self, tables: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """
         獲取結構化的資料庫 schema 信息
+
+        Args:
+            tables: 要獲取的表名列表，None 表示獲取所有表
 
         Returns:
             List[Dict]: 包含每個表的結構化信息
@@ -234,7 +257,7 @@ class SQLiteAdapter(BaseQueryComposer):
                 }]
         """
         try:
-            schema_data = await self._get_schema_info()
+            schema_data = await self._get_schema_info(tables=tables)
             if not schema_data:
                 return []
 

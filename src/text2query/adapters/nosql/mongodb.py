@@ -23,6 +23,11 @@ class MongoDBAdapter(BaseQueryComposer):
     # 1. 初始化和基本屬性
     # ============================================================================
 
+    @property
+    def db_type(self) -> str:
+        """Return the database type identifier."""
+        return "mongodb"
+
     def __init__(self, config: Optional[BaseConnectionConfig] = None):
         if config is None:
             config = MongoDBConfig(database_name="default")
@@ -115,15 +120,18 @@ class MongoDBAdapter(BaseQueryComposer):
                 'execution_time': execution_time
             }
 
-    async def get_schema_str(self) -> str:
+    async def get_schema_str(self, tables: Optional[List[str]] = None) -> str:
         """
         獲取 MongoDB 資料庫結構字符串
+
+        Args:
+            tables: 要獲取的集合名稱列表，None 表示獲取所有集合
 
         Returns:
             str: 包含所有集合結構的描述字符串
         """
         try:
-            schema_data = await self._get_schema_info()
+            schema_data = await self._get_schema_info(tables=tables)
 
             if schema_data is None:
                 return "MongoDB database has no collections"
@@ -171,9 +179,12 @@ class MongoDBAdapter(BaseQueryComposer):
             self.logger.error("Failed to get MongoDB struct string: %s", error)
             return f"Error retrieving MongoDB structure: {str(error)}"
 
-    async def get_schema_list(self) -> List[Dict[str, Any]]:
+    async def get_schema_list(self, tables: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """
         獲取結構化的資料庫 schema 信息
+
+        Args:
+            tables: 要獲取的集合名稱列表，None 表示獲取所有集合
 
         Returns:
             List[Dict]: 包含每個集合的結構化信息
@@ -187,7 +198,7 @@ class MongoDBAdapter(BaseQueryComposer):
                 }]
         """
         try:
-            schema_data = await self._get_schema_info()
+            schema_data = await self._get_schema_info(tables=tables)
 
             if schema_data is None:
                 return []
@@ -220,9 +231,12 @@ class MongoDBAdapter(BaseQueryComposer):
             self.logger.error("Failed to get structured schema: %s", error)
             return []
 
-    async def _get_schema_info(self) -> Optional[Dict[str, Any]]:
+    async def _get_schema_info(self, tables: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
         """
         分析所有集合的 schema 信息（核心方法）
+
+        Args:
+            tables: 要獲取的集合名稱列表，None 表示獲取所有集合
 
         Returns:
             Optional[Dict]: 包含資料庫和集合信息的字典
@@ -252,6 +266,13 @@ class MongoDBAdapter(BaseQueryComposer):
             if not collections:
                 # 如果沒有指定集合，獲取所有集合
                 collections = await self._db.list_collection_names()
+                if not collections:
+                    return None
+
+            # 過濾集合
+            if tables:
+                tables_set = set(tables)
+                collections = [c for c in collections if c in tables_set]
                 if not collections:
                     return None
 

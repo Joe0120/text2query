@@ -51,12 +51,19 @@ async def main():
     config = load_config_from_url("postgresql://user:pass@localhost:5432/mydb")
     adapter = create_adapter(config)
 
-    # Get database schema
+    # Get database schema (all tables)
     schema_str = await adapter.get_schema_str()
+
+    # Or filter specific tables only
+    schema_str = await adapter.get_schema_str(tables=["users", "orders"])
 
     # Initialize LLM and Text2SQL
     llm = OpenAI(model="gpt-4o-mini", api_key="your-api-key")
-    t2s = Text2SQL(llm=llm, db_structure=schema_str, db_type="postgresql")
+    t2s = Text2SQL(
+        llm=llm,
+        db_structure=schema_str,
+        db_type=adapter.db_type  # Auto-detect from adapter: "postgresql", "mysql", etc.
+    )
 
     # Generate SQL from natural language
     sql = await t2s.generate_query("List all users older than 30")
@@ -87,14 +94,14 @@ chart_config = await chart_gen.generate_chart(
 
 ## Supported Databases
 
-| Database | Adapter | Config |
-|----------|---------|--------|
-| PostgreSQL | `PostgreSQLAdapter` | `PostgreSQLConfig` |
-| MySQL | `MySQLAdapter` | `MySQLConfig` |
-| MongoDB | `MongoDBAdapter` | `MongoDBConfig` |
-| SQLite | `SQLiteAdapter` | `SQLiteConfig` |
-| SQL Server | `SQLServerAdapter` | `SQLServerConfig` |
-| Oracle | `OracleAdapter` | `OracleConfig` |
+| Database | Adapter | Config | `db_type` |
+|----------|---------|--------|-----------|
+| PostgreSQL | `PostgreSQLAdapter` | `PostgreSQLConfig` | `"postgresql"` |
+| MySQL | `MySQLAdapter` | `MySQLConfig` | `"mysql"` |
+| MongoDB | `MongoDBAdapter` | `MongoDBConfig` | `"mongodb"` |
+| SQLite | `SQLiteAdapter` | `SQLiteConfig` | `"sqlite"` |
+| SQL Server | `SQLServerAdapter` | `SQLServerConfig` | `"sqlserver"` |
+| Oracle | `OracleAdapter` | `OracleConfig` | `"oracle"` |
 
 ## API Reference
 
@@ -126,6 +133,24 @@ from text2query.adapters import (
     OracleAdapter,
     MongoDBAdapter,
 )
+```
+
+#### Adapter Methods
+
+```python
+# Get database type identifier
+db_type = adapter.db_type  # "postgresql", "mysql", "sqlite", "oracle", "sqlserver", "mongodb"
+
+# Get schema as CREATE TABLE statements
+schema_str = await adapter.get_schema_str()                      # All tables
+schema_str = await adapter.get_schema_str(tables=["t1", "t2"])   # Specific tables
+
+# Get schema as structured list
+schema_list = await adapter.get_schema_list()                    # All tables
+schema_list = await adapter.get_schema_list(tables=["t1", "t2"]) # Specific tables
+
+# Execute SQL query
+result = await adapter.sql_execution(sql, safe=True, limit=100)
 ```
 
 ### Core Classes
