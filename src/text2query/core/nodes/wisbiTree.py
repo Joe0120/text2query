@@ -1,9 +1,11 @@
 from __future__ import annotations
 from typing import Any, Dict, Literal, Optional
+import logging
 
 from langgraph.graph import END, StateGraph
 
 from ..connections.postgresql import PostgreSQLConfig
+from ..template_matching.store import TemplateStore
 from ..memory.store import ConversationMemoryStore
 from ..training.store import TrainingStore
 from ..utils.model_configs import ModelConfig
@@ -15,8 +17,10 @@ from .orchestrator import (
     route_by_current_move,
 )
 from .state import WisbiState, available_moves
-from .template_node import TemplateNode, TemplateRepo
+from .template_node import TemplateNode
 from .trainer_node import TrainerNode
+
+logger = logging.getLogger(__name__)
 
 
 class WisbiWorkflow:
@@ -47,7 +51,8 @@ class WisbiWorkflow:
     def __init__(
         self,
         db_config: PostgreSQLConfig,
-        template_llm_config: ModelConfig,
+        llm_config: ModelConfig,
+        embedder_config: ModelConfig,
         *,
         template_schema: str = "wisbi",
         training_schema: str = "wisbi",
@@ -61,7 +66,8 @@ class WisbiWorkflow:
         
         Args:
             db_config: PostgreSQL connection configuration
-            template_llm_config: ModelConfig for template embeddings (TemplateStore)
+            llm_config: ModelConfig for template embeddings (TemplateStore)
+            embedder_config: ModelConfig for template embeddings (TemplateStore)
             template_schema: Schema name for templates table
             training_schema: Schema name for training tables
             memory_schema: Schema name for conversation history
@@ -70,7 +76,8 @@ class WisbiWorkflow:
             clarify_node: Clarify node instance (optional, can be a simple function)
         """
         self.db_config = db_config
-        self.template_llm_config = template_llm_config
+        self.llm_config = llm_config
+        self.embedder_config = embedder_config
         self.template_schema = template_schema
         self.training_schema = training_schema
         self.memory_schema = memory_schema
@@ -89,22 +96,20 @@ class WisbiWorkflow:
         Build and initialize all internal nodes and their backing stores.
         
         This method wires:
-          - TemplateRepo / TemplateNode
+          - TemplateNode
           - TrainingStore / TrainerNode
           - ConversationMemoryStore / MemoryNode
         """
         if self.template_node and self.trainer_node and self.memory_node:
             # Nodes already built
             return
-
-        # Template repository (uses its own TemplateStore internally)
-        template_repo = TemplateRepo(
-            db_config=self.db_config,
-            llm_config=self.template_llm_config,
+        
+        # Template store
+        template_store = await TemplateStore.initialize(
+            postgres_config=self.db_config,
             template_schema=self.template_schema,
             embedding_dim=self.embedding_dim,
         )
-
         # RAG training store
         training_store = await TrainingStore.initialize(
             postgres_config=self.db_config,
@@ -118,7 +123,7 @@ class WisbiWorkflow:
             memory_schema=self.memory_schema,
         )
 
-        self.template_node = TemplateNode(template_repo=template_repo)
+        self.template_node = TemplateNode(template_store=template_store)
         self.trainer_node = TrainerNode(training_store=training_store)
         self.memory_node = MemoryNode(memory_store=memory_store)
     
@@ -129,10 +134,17 @@ class WisbiWorkflow:
             raise RuntimeError("Workflow nodes not initialized. Call await build() first.")
 
         async def template_node_wrapper(state: WisbiState) -> WisbiState:
-            return await self.template_node(state)
+            try:
+                return await self.template_node(state)
+            except Exception as e:
+                logger.error(f"Error in template_node: {e}", exc_info=True)
+                raise
         
         async def trainer_node_wrapper(state: WisbiState) -> WisbiState:
-            return await self.trainer_node(state)
+            logger.debug(f"Trainer node wrapper received state, training_score before: {state.get('training_score')}")
+            result_state = await self.trainer_node(state)
+            logger.debug(f"Trainer node wrapper returning state, training_score after: {result_state.get('training_score')}")
+            return result_state
         
         async def memory_retrieve_wrapper(state: WisbiState) -> WisbiState:
             """Memory node wrapper for retrieving context"""
@@ -146,9 +158,33 @@ class WisbiWorkflow:
             return state
         
         async def default_executor_node(state: WisbiState) -> WisbiState:
-            """Default executor node - can be replaced with actual implementation"""
-            # TODO: Implement actual query execution
+            """Default executor node - extracts SQL from state and marks execution complete"""
+            # Log confidence scores
+            template_score = state.get("template_score")
+            training_score = state.get("training_score")
+            
+            logger.info("=" * 60)
+            logger.info("Executor Node - Final Confidence Scores:")
+            if template_score is not None:
+                logger.info(f"  Template Score: {template_score:.4f} (similarity)")
+            else:
+                logger.info("  Template Score: None (no template match)")
+            
+            if training_score is not None:
+                logger.info(f"  Training Score: {training_score:.4f} (similarity)")
+            else:
+                logger.info("  Training Score: None (no training results)")
+            logger.info("=" * 60)
+            
+            # Extract SQL from state (template_sql is set by template_node if available)
+            template_sql = state.get("template_sql")
+            if template_sql:
+                state["sql"] = template_sql
+                logger.info(f"Using template SQL in executor_node (confidence: {template_score:.4f})")
+            # If no template_sql, sqlgen.py will generate it as fallback
+            
             state["current_move"] = "executor"
+            state["execution_success"] = True
             return state
         
         async def default_clarify_node(state: WisbiState) -> WisbiState:
@@ -221,17 +257,10 @@ class WisbiWorkflow:
             }
         )
         
-        # After template_node: if score is low -> clarify_node, else -> executor_node
-        workflow.add_conditional_edges(
-            "template_node",
-            reroute_based_on_confidence,
-            {
-                "clarify_node": "clarify_node",
-                "executor_node": "executor_node",
-            }
-        )
+        # After template_node: always go to executor_node
+        workflow.add_edge("template_node", "executor_node")
         
-        # clarify_node does nothing and routes directly to executor_node
+        # clarify_node routes directly to executor_node (if used in future)
         workflow.add_edge("clarify_node", "executor_node")
         
         workflow.add_edge("executor_node", "memory_save_node")

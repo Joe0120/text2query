@@ -25,6 +25,7 @@ class WisbiState(TypedDict):
     group_id: NotRequired[Optional[str]]
     top_k: NotRequired[Optional[int]]
     search_results: NotRequired[Optional[str]]
+    training_score: NotRequired[Optional[float]]  # Similarity score from training search (0.0 to 1.0)
 
     # Template matching
     template: Optional[Template]
@@ -49,3 +50,4 @@ class WisbiState(TypedDict):
     result_summary: NotRequired[Optional[str]]  # Summary of execution results
     result_count: NotRequired[Optional[int]]  # Number of rows returned
     generated_query: NotRequired[Optional[str]]  # Generated SQL/query
+    sql: NotRequired[Optional[str]]  # Final SQL query to execute (set by executor_node)

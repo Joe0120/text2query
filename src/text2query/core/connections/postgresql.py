@@ -34,7 +34,8 @@ class PostgreSQLConfig(BaseConnectionConfig):
         # Add SSL mode
         params = [f"sslmode={self.ssl_mode}"]
         if self.schema and self.schema != "public":
-            params.append(f"options=-csearch_path={self.schema}")
+            # Include 'public' in search_path so extension types (like vector) are accessible
+            params.append(f"options=-csearch_path={self.schema}, public")
         
         # Add extra parameters
         for key, value in self.extra_params.items():

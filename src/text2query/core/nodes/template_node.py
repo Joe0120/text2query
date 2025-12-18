@@ -6,156 +6,21 @@ import logging
 
 from .state import WisbiState
 from ..utils.models import agenerate_chat, ModelConfig
-from ..connections.postgresql import PostgreSQLConfig
 from ..template_matching.store import TemplateStore
 from ..template_matching.models import Template
 
 logger = logging.getLogger(__name__)
 
 
-class TemplateRepo:
-    """Template repository with RAG-based retrieval
+class TemplateNode:
+    """Template node with RAG-based template retrieval
     
-    This class manages templates using vector similarity search.
-    Templates are loaded from YAML and stored in PostgreSQL with embeddings.
+    This class handles:
+    - Planning: Extracting components from natural language queries using LLM
+    - Template matching: Finding similar templates using vector similarity search
+    - Auto-population: Loading templates from YAML if store is empty
     """
     
-    def __init__(
-        self,
-        templates_file: Optional[str] = None,
-        template_store: Optional[TemplateStore] = None,
-        db_config: Optional[PostgreSQLConfig] = None,
-        llm_config: Optional[ModelConfig] = None,
-        embedder_config: Optional[ModelConfig] = None,
-        template_schema: str = "wisbi",
-        embedding_dim: int = 768,
-    ):
-        """Initialize TemplateRepo
-        
-        Args:
-            templates_file: Path to templates.yaml file (optional, will try to find it)
-            template_store: Pre-initialized TemplateStore instance (optional)
-            db_config: PostgreSQL config for TemplateStore (required if template_store not provided)
-            llm_config: LLM config for embeddings (required if template_store not provided)
-            embedder_config: Embedder config for generating embeddings (required if template_store not provided)
-            template_schema: Schema name for template tables (default: "wisbi")
-            embedding_dim: Embedding vector dimension (default: 768)
-        """
-        self.templates_file = templates_file or self._find_templates_file()
-        self.template_store = template_store
-        self.db_config = db_config
-        self.llm_config = llm_config
-        self.embedder_config = embedder_config
-        self.template_schema = template_schema
-        self.embedding_dim = embedding_dim
-        self.templates: Dict[str, Template] = {}
-
-    def _find_templates_file(self) -> str:
-        """Try to find templates.yaml file in common locations"""
-        current_file = Path(__file__)
-        possible_paths = [
-            current_file.parent.parent / "utils" / "templates" / "templates.yaml",
-            Path("core/utils/templates/templates.yaml"),
-            Path("templates/templates.yaml"),
-        ]
-        for path in possible_paths:
-            if path.exists():
-                return str(path)
-        raise FileNotFoundError("Could not find templates.yaml file")
-
-    def load_templates(self) -> Dict[str, Template]:
-        """Load templates from YAML file
-        
-        Returns:
-            Dict[str, Template]: Dictionary mapping template IDs to Template objects
-        """
-        try:
-            with open(self.templates_file, 'r') as file:
-                data = yaml.safe_load(file)
-            templates = data.get('templates', {})
-            for template_id, template_data in templates.items():
-                template = Template(
-                    id=template_id,
-                    description=template_data.get('description', ''),
-                    base_query=template_data.get('base_query', None),
-                    dimensions=template_data.get('dimensions', {}),
-                    filters=template_data.get('filters', {}),
-                    metrics=template_data.get('metrics', []),
-                    sql=template_data.get('sql', None))
-                self.templates[template_id] = template
-            logger.info(f"Loaded {len(self.templates)} templates from {self.templates_file}")
-            return self.templates
-        except Exception as e:
-            logger.error(f"Failed to load templates: {e}")
-            raise
-
-    async def initialize(self) -> None:
-        """Initialize TemplateRepo and auto-populate templates if store is empty"""
-        if self.template_store is None:
-            if self.db_config is None or self.embedder_config is None:
-                raise ValueError(
-                    "Either template_store must be provided, or both db_config and embedder_config "
-                    "must be provided for TemplateRepo initialization"
-                )
-            self.template_store = await TemplateStore.initialize(
-                postgres_config=self.db_config,
-                template_schema=self.template_schema,
-                embedding_dim=self.embedding_dim,
-                embedder_config=self.embedder_config,
-            )
-        
-        # Auto-populate templates from YAML if store is empty
-        is_empty = await self.template_store.is_empty()
-        if is_empty:
-            logger.info("Template store is empty, auto-populating from templates.yaml")
-            templates = self.load_templates()
-            
-            # Insert all templates in the store with SQL from YAML
-            for template in templates.values():
-                await self.template_store.insert_template(
-                    template=template,
-                    sql_command=template.sql,
-                )
-            
-            logger.info(f"Auto-populated {len(templates)} templates to store")
-            # Clear templates dict after use to free memory
-            self.templates.clear()
-        else:
-            logger.info("Template store already contains templates, skipping auto-population")
-    
-    async def find_top_templates(
-        self,
-        components: Dict[str, Any],
-        top_k: int = 3,
-        min_similarity: float = 0.0,
-    ) -> List[Tuple[float, Template]]:
-        """
-        Find top K matching templates using RAG-based vector similarity.
-        
-        Args:
-            components: Dictionary with base_query, dimensions, filters, etc.
-            top_k: Number of top templates to return (default: 3)
-            min_similarity: Minimum similarity score threshold (default: 0.0)
-            
-        Returns:
-            List[Tuple[float, Template]]: List of (similarity_score, template) tuples,
-                sorted by similarity (highest first). The template.sql field
-                contains the corresponding SQL command (if available).
-        """
-        await self.initialize()
-        return await self.template_store.find_similar_templates(
-            components=components,
-            top_k=top_k,
-            min_similarity=min_similarity,
-        )
-    
-    async def close(self):
-        """Close the template store connection"""
-        if self.template_store:
-            await self.template_store.close()
-
-
-class TemplateNode:
     _PROMPT = (
         "You are a planner. Produce ONLY YAML matching the schema below under a single 'components' root.\n"
         "If a field is not inferable, use null or omit it.\n\n"
@@ -181,37 +46,160 @@ class TemplateNode:
     
     def __init__(
         self,
-        template_repo: TemplateRepo,
+        template_store: TemplateStore,
+        templates_file: Optional[str] = None,
     ):
-        """
-        Initialize TemplateNode.
+        """Initialize TemplateNode
         
         Args:
-            template_repo: Template repository instance
+            template_store: Pre-initialized TemplateStore instance (required)
+            templates_file: Path to templates.yaml file (optional, will try to find it)
         """
-        self.template_repo = template_repo
+        if template_store is None:
+            raise ValueError("template_store is required")
+        self.template_store = template_store
+        self.templates_file = templates_file or self._find_templates_file()
 
-    async def plan(self, state: WisbiState, query_text: str) -> Dict[str, Any]:
+    def _find_templates_file(self) -> str:
+        """Try to find templates.yaml file in common locations"""
+        current_file = Path(__file__)
+        possible_paths = [
+            current_file.parent.parent / "utils" / "templates" / "templates.yaml",
+            Path("core/utils/templates/templates.yaml"),
+            Path("templates/templates.yaml"),
+        ]
+        for path in possible_paths:
+            if path.exists():
+                return str(path)
+        raise FileNotFoundError("Could not find templates.yaml file")
+
+    def _load_templates_from_yaml(self) -> Dict[str, Template]:
+        """Load templates from YAML file
+        
+        Returns:
+            Dict[str, Template]: Dictionary mapping template IDs to Template objects
+        """
+        try:
+            with open(self.templates_file, 'r') as file:
+                data = yaml.safe_load(file)
+            templates = {}
+            template_data = data.get('templates', {})
+            for template_id, template_info in template_data.items():
+                template = Template(
+                    id=template_id,
+                    description=template_info.get('description', ''),
+                    base_query=template_info.get('base_query', None),
+                    dimensions=template_info.get('dimensions', {}),
+                    filters=template_info.get('filters', {}),
+                    metrics=template_info.get('metrics', []),
+                    sql=template_info.get('sql', None),
+                )
+                templates[template_id] = template
+            logger.info(f"Loaded {len(templates)} templates from {self.templates_file}")
+            return templates
+        except Exception as e:
+            logger.error(f"Failed to load templates: {e}")
+            raise
+
+    async def _populate_if_empty(self, embedder_config: ModelConfig) -> None:
+        """Auto-populate templates from YAML if store is empty"""
+        if await self.template_store.is_empty():
+            logger.info("Template store is empty, auto-populating from templates.yaml")
+            templates = self._load_templates_from_yaml()
+            
+            # Insert all templates in the store with SQL from YAML
+            for template in templates.values():
+                await self.template_store.insert_template(
+                    template=template,
+                    embedder_config=embedder_config,
+                    sql_command=template.sql,
+                )
+            
+            logger.info(f"Auto-populated {len(templates)} templates to store")
+        else:
+            logger.info("Template store already contains templates, skipping auto-population")
+    
+    async def _find_top_templates(
+        self,
+        components: Dict[str, Any],
+        embedder_config: ModelConfig,
+        top_k: int = 3,
+        min_similarity: float = 0.0,
+    ) -> List[Tuple[float, Template]]:
+        """Find top K matching templates using RAG-based vector similarity.
+        
+        Args:
+            components: Dictionary with base_query, dimensions, filters, etc.
+            embedder_config: Embedder config for generating embeddings
+            top_k: Number of top templates to return (default: 3)
+            min_similarity: Minimum similarity score threshold (default: 0.0)
+            
+        Returns:
+            List[Tuple[float, Template]]: List of (similarity_score, template) tuples,
+                sorted by similarity (highest first). The template.sql field
+                contains the corresponding SQL command (if available).
+        """
+        await self._populate_if_empty(embedder_config)
+        return await self.template_store.find_similar_templates(
+            components=components,
+            embedder_config=embedder_config,
+            top_k=top_k,
+            min_similarity=min_similarity,
+        )
+    
+    async def _plan(self, state: WisbiState, query_text: str) -> Dict[str, Any]:
+        """Extract components from natural language query using LLM
+        
+        Args:
+            state: Workflow state containing llm_config
+            query_text: Natural language query
+            
+        Returns:
+            Dict containing extracted components
+        """
         prompt = self._PROMPT.format(query=query_text)
-        model_config = state.get("llm_config")
+        llm_config = state.get("llm_config")
         messages = [{"role": "user", "content": prompt}]
-        response = await agenerate_chat(model_config, messages)
+        response = await agenerate_chat(llm_config, messages)
         return yaml.safe_load(response)
 
     async def __call__(self, state: WisbiState) -> WisbiState:
+        """Execute template node: plan query and find matching templates
+        
+        Args:
+            state: Workflow state containing query_text, llm_config, and embedder_config
+            
+        Returns:
+            Updated state with template matching results
+        """
         query_text = state.get("query_text")
         if query_text is None:
             return state
         
-        components_raw = await self.plan(state, query_text)
+        # Extract components from query using LLM
+        components_raw = await self._plan(state, query_text)
         components = components_raw.get("components", {}) or {}
         
+        # Get embedder_config from state
+        embedder_config = state.get("embedder_config")
+        if embedder_config is None:
+            raise ValueError("embedder_config is required in state for TemplateNode")
+        
         # Find top 3 templates using RAG
-        top_templates = await self.template_repo.find_top_templates(components, top_k=3)
+        top_templates = await self._find_top_templates(
+            components,
+            embedder_config=embedder_config,
+            top_k=3,
+        )
         
         if not top_templates:
             logger.warning("No templates found matching components")
             return state
+        
+        # Log all template scores
+        logger.info(f"Template matching results (similarity scores):")
+        for idx, (score, template) in enumerate(top_templates, 1):
+            logger.info(f"  Template {idx}: {template.id} - similarity: {score:.4f} (distance: {1-score:.4f})")
         
         # Store top templates in state
         state["top_templates"] = top_templates
@@ -221,4 +209,11 @@ class TemplateNode:
         state["template"] = best_template
         state["template_sql"] = best_template.sql
         
+        logger.info(f"Selected best template: {best_template.id} with confidence score: {best_score:.4f}")
+        
         return state
+    
+    async def close(self):
+        """Close the template store connection"""
+        if self.template_store:
+            await self.template_store.close()

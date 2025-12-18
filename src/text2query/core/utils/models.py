@@ -10,16 +10,18 @@ def build_header(config: ModelConfig) -> Dict[str, str]:
     header: Dict[str, str] = {
         "Content-Type": "application/json",
     }
-    if config.provider == "openai":
+    # Groq and OpenAI both use Bearer token authentication
+    if config.provider in ("openai", "groq"):
         header["Authorization"] = f"Bearer {config.api_key}"
     return header
 
 def parse_response(config: ModelConfig, data: Dict[str, Any]) -> str:
-    if config.provider == "openai":
+    # Groq uses OpenAI-compatible response format
+    if config.provider in ("openai", "groq"):
         try:
             return data["choices"][0]["message"]["content"]
         except Exception as e:
-            raise RuntimeError(f"Unexpected OpenAI chat response format: {data}") from e
+            raise RuntimeError(f"Unexpected {config.provider} chat response format: {data}") from e
 
     if config.provider == "ollama":
         try:
@@ -54,7 +56,8 @@ async def agenerate_chat(config: ModelConfig, messages: List[Dict[str, str]]) ->
     return await asyncio.to_thread(generate_chat, config, messages)
 
 def parse_embedding(config: ModelConfig, data: Dict[str, Any]) -> List[float]:
-    if config.provider == "openai":
+    # Groq uses OpenAI-compatible embedding response format
+    if config.provider in ("openai", "groq"):
         return data["data"][0]["embedding"]
     elif config.provider == "ollama":
         return data["embeddings"][0]

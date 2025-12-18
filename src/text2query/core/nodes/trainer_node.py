@@ -4,6 +4,9 @@ from .state import WisbiState
 
 from typing import Optional, List, Dict, Any
 from ..utils.models import aembed_text
+import logging
+
+logger = logging.getLogger(__name__)
 
 class TrainerNode:
     def __init__(self, training_store: TrainingStore):
@@ -62,11 +65,45 @@ class TrainerNode:
             top_k=state.get("top_k", 8),
         )
 
-        print("Search Results:")
+        # Log training search results with similarity scores/distances
+        logger.info("Training search results (distance scores):")
+        total_results = 0
+        best_distance = None
+        
         for table_name, results in search_results.items():
-            print(f"- Table {table_name}: {len(results)} results")
+            count = len(results)
+            total_results += count
+            if count > 0:
+                # Extract distances from results (if available)
+                distances = [r.get("distance") for r in results if r.get("distance") is not None]
+                if distances:
+                    min_dist = min(distances)
+                    max_dist = max(distances)
+                    avg_dist = sum(distances) / len(distances)
+                    if best_distance is None or min_dist < best_distance:
+                        best_distance = min_dist
+                    logger.info(f"  {table_name}: {count} results - distances: min={min_dist:.4f}, max={max_dist:.4f}, avg={avg_dist:.4f}")
+                else:
+                    logger.info(f"  {table_name}: {count} results (no distance scores available)")
+        
+        if best_distance is not None:
+            # Convert distance to similarity (1 - distance for cosine distance)
+            training_similarity = 1 - best_distance
+            state["training_score"] = training_similarity
+            logger.info(f"Best training match - distance: {best_distance:.4f}, similarity: {training_similarity:.4f}")
+            logger.info(f"Setting training_score in state: {state.get('training_score')}")
+        else:
+            logger.info(f"Total training results: {total_results} (no distance scores to calculate similarity)")
+            if total_results > 0:
+                # Set a default score if we have results but no distances
+                state["training_score"] = 0.5
+                logger.info(f"Setting training_score to default 0.5 (results available but no distances)")
+            else:
+                state["training_score"] = 0.0
+                logger.info(f"Setting training_score to 0.0 (no results)")
         
         state["search_results"] = self.format_response(search_results)
+        logger.info(f"Trainer node returning state with training_score: {state.get('training_score')}, search_results length: {len(state.get('search_results', ''))}")
         return state
 
 if __name__ == "__main__":

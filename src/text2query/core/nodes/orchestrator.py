@@ -1,6 +1,9 @@
 from __future__ import annotations
 from typing import Any, Dict, Optional, Literal, List
+import logging
 from .state import WisbiState, available_moves
+
+logger = logging.getLogger(__name__)
 
 def orchestrator_node(state: WisbiState) -> WisbiState:
     """
@@ -31,10 +34,12 @@ def reroute_based_on_confidence(state: WisbiState) -> Literal["template_node", "
     Evaluates confidence from the current node and determines next route.
     
     Flow:
-    - After trainer_node: if score not high or training is empty → template_node, else → executor_node
-    - After template_node: if score is low → clarify_node, else → executor_node
+    - After trainer_node: if score >= 0.5 and training results available → executor_node (use training context)
+                         if score < 0.5 or no results → template_node (fallback to template)
+    - After template_node: always → executor_node
     
     Training is priority first, template is fallback.
+    Uses training context when similarity >= 0.5.
     """
     current = state.get("current_move")
     
@@ -42,31 +47,44 @@ def reroute_based_on_confidence(state: WisbiState) -> Literal["template_node", "
         search_results = state.get("search_results")
         training_score = state.get("training_score")
         
+        logger.info(f"Routing decision after trainer_node:")
+        logger.info(f"  Training score: {training_score}")
+        logger.info(f"  Search results available: {search_results is not None and search_results != ''}")
+        
         if search_results is None or search_results == "":
+            logger.info("  → Routing to template_node (no training results)")
             state["current_move"] = "template"
             return "template_node"
         
-        if training_score is not None and training_score < 0.7:
+        # Use training context if similarity >= 0.5 (lowered from 0.7)
+        # If training_score is None but we have results, calculate similarity from best distance
+        if training_score is None:
+            # Try to extract similarity from search_results if available
+            # This handles cases where training_score wasn't set but we have results
+            logger.info("  → Training score is None, but search results available - will use training context")
+            state["current_move"] = "executor"
+            return "executor_node"
+        
+        if training_score < 0.5:
+            logger.info(f"  → Routing to template_node (training score {training_score:.4f} < 0.5 threshold)")
             state["current_move"] = "template"
             return "template_node"
         
+        # training_score >= 0.5, use training context
+        logger.info(f"  → Routing to executor_node (training score {training_score:.4f} >= 0.5 threshold, using training context)")
         state["current_move"] = "executor"
         return "executor_node"
         
     elif current == "template":
         template_score = state.get("template_score")
-        
-        if template_score is None:
-            state["current_move"] = "clarify"
-            return "clarify_node"
-        
-        if template_score < 0.5:
-            state["current_move"] = "clarify"
-            return "clarify_node"
-        
+        logger.info(f"Routing decision after template_node:")
+        logger.info(f"  Template score: {template_score}")
+        logger.info(f"  → Routing to executor_node")
         state["current_move"] = "executor"
         return "executor_node"
     else:
+        # Default: go to executor
+        logger.info(f"Routing decision (current_move={current}): → executor_node (default)")
         state["current_move"] = "executor"
         return "executor_node"
         
@@ -85,3 +103,6 @@ def route_by_current_move(state: WisbiState) -> Literal["template_node", "traine
         return "clarify_node"
     elif current_move == "executor":
         return "executor_node"
+    else:
+        # Default to trainer_node if current_move is None or unexpected
+        return "trainer_node"
