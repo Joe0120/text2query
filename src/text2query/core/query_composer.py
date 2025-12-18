@@ -10,7 +10,13 @@ from .connections import BaseConnectionConfig
 
 class BaseQueryComposer(ABC):
     """Abstract base class for query composers"""
-    
+
+    @property
+    @abstractmethod
+    def db_type(self) -> str:
+        """Return the database type identifier (e.g., 'postgresql', 'mysql', 'mongodb')"""
+        pass
+
     def __init__(self, config: Optional[BaseConnectionConfig] = None):
         """
         Initialize query composer with connection configuration

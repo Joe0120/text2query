@@ -1,13 +1,13 @@
 [project]
 name = "text2query"
-version = "0.0.1"
-description = "A Python library that converts natural language queries to database queries"
+version = "0.0.4"
+description = "A Python library that converts natural language queries to database queries using LLM"
 authors = [
-    {name = "Joe Lin", email = "joelin890120@gmail.com"}
+    {name = "_Joe", email = "joelin890120@gmail.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.12"
-keywords = ["text2query", "sql", "mongodb", "natural-language", "database", "llm"]
+keywords = ["text2query", "sql", "mongodb", "natural-language", "database", "llm", "text-to-sql"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -42,7 +42,6 @@ mysql = ["aiomysql>=0.2.0", "PyMySQL>=1.1.2"]
 mongodb = ["motor>=3.7.1", "pymongo>=4.15.1", "dnspython>=2.8.0"]
 oracle = ["oracledb>=2.0.0"]
 sqlserver = ["pymssql>=2.2.0", "aioodbc>=0.5.0"]
-trino = ["trino>=0.328.0"]
 postgresql-sync = ["psycopg2-binary>=2.9.0"]
 mysql-sync = ["mysql-connector-python>=8.0.0"]
 
@@ -56,7 +55,6 @@ all-db = [
     "oracledb>=2.0.0",
     "pymssql>=2.2.0",
     "aioodbc>=0.5.0",
-    "trino>=0.328.0",
     "psycopg2-binary>=2.9.0",
     "mysql-connector-python>=8.0.0",
 ]

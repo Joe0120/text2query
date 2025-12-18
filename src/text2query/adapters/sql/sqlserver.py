@@ -22,6 +22,11 @@ class SQLServerAdapter(BaseQueryComposer):
     # 1. 初始化和基本屬性
     # ============================================================================
 
+    @property
+    def db_type(self) -> str:
+        """Return the database type identifier."""
+        return "sqlserver"
+
     def __init__(self, config: Optional[BaseConnectionConfig] = None):
         super().__init__(config)
         self.quote_char = "["
@@ -104,9 +109,12 @@ class SQLServerAdapter(BaseQueryComposer):
             "metadata": execution["metadata"],
         }
 
-    async def _get_schema_info(self) -> Optional[Dict[str, Any]]:
+    async def _get_schema_info(self, tables: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
         """
         獲取資料庫 schema 信息（核心方法）
+
+        Args:
+            tables: 要獲取的表名列表，None 表示獲取所有表
 
         Returns:
             Optional[Dict]: 包含資料庫、schema 和表信息的字典
@@ -133,14 +141,14 @@ class SQLServerAdapter(BaseQueryComposer):
 
         try:
             schema_data = await loop.run_in_executor(
-                None, self._fetch_schema_info_sync, current_database
+                None, self._fetch_schema_info_sync, current_database, tables
             )
             return schema_data
         except Exception as error:
             self.logger.error("Failed to get schema info: %s", error)
             raise
 
-    def _fetch_schema_info_sync(self, database: str) -> Optional[Dict[str, Any]]:
+    def _fetch_schema_info_sync(self, database: str, tables: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
         """在執行器中同步獲取 schema 信息"""
         import pymssql
 
@@ -171,13 +179,20 @@ class SQLServerAdapter(BaseQueryComposer):
                 ORDER BY TABLE_SCHEMA, TABLE_NAME
             """, (database,))
 
-            tables = cursor.fetchall()
+            all_tables = cursor.fetchall()
 
-            if not tables:
+            if not all_tables:
                 return None
 
+            # 過濾表
+            if tables:
+                tables_set = set(tables)
+                all_tables = [(s, t) for s, t in all_tables if t in tables_set]
+                if not all_tables:
+                    return None
+
             tables_info = []
-            for schema_name, table_name in tables:
+            for schema_name, table_name in all_tables:
                 # 獲取列信息
                 cursor.execute("""
                     SELECT
@@ -248,15 +263,18 @@ class SQLServerAdapter(BaseQueryComposer):
             cursor.close()
             connection.close()
 
-    async def get_schema_str(self) -> str:
+    async def get_schema_str(self, tables: Optional[List[str]] = None) -> str:
         """
         獲取當前資料庫中所有表的 SQL 結構字符串
+
+        Args:
+            tables: 要獲取的表名列表，None 表示獲取所有表
 
         Returns:
             str: 包含所有表結構的 CREATE TABLE 語句字符串
         """
         try:
-            schema_data = await self._get_schema_info()
+            schema_data = await self._get_schema_info(tables=tables)
             if not schema_data or not schema_data.get('tables'):
                 return ""
 
@@ -271,9 +289,12 @@ class SQLServerAdapter(BaseQueryComposer):
             self.logger.error("Failed to get SQL struct string: %s", error)
             return ""
 
-    async def get_schema_list(self) -> List[Dict[str, Any]]:
+    async def get_schema_list(self, tables: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """
         獲取結構化的資料庫 schema 信息
+
+        Args:
+            tables: 要獲取的表名列表，None 表示獲取所有表
 
         Returns:
             List[Dict]: 包含每個表的結構化信息
@@ -287,7 +308,7 @@ class SQLServerAdapter(BaseQueryComposer):
                 }]
         """
         try:
-            schema_data = await self._get_schema_info()
+            schema_data = await self._get_schema_info(tables=tables)
             if not schema_data:
                 return []
 
