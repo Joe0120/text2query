@@ -1,6 +1,6 @@
 [project]
 name = "text2query"
-version = "0.0.2"
+version = "0.0.4"
 description = "A Python library that converts natural language queries to database queries using LLM"
 authors = [
     {name = "_Joe", email = "joelin890120@gmail.com"}
