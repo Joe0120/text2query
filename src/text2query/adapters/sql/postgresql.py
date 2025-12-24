@@ -68,6 +68,9 @@ class PostgreSQLAdapter(BaseQueryComposer):
 
         sql_to_run = self._apply_limit(sql_to_run, limit)
 
+        # Auto-prefix UUID table names with "t2s" schema
+        sql_to_run = self._add_schema_to_uuid_tables(sql_to_run)
+
         try:
             args = self._normalize_params(params)
         except TypeError as error:
@@ -432,6 +435,28 @@ class PostgreSQLAdapter(BaseQueryComposer):
 
         sql_no_semicolon = sql_command.rstrip().rstrip(";")
         return f"{sql_no_semicolon} LIMIT {limit};"
+
+    def _add_schema_to_uuid_tables(self, sql_command: str) -> str:
+        """
+        Add 't2s' schema prefix to UUID table names in SQL command.
+
+        Converts: "d586d024-a1c5-49f1-8556-e18dc20ba55a"
+        To:       "t2s"."d586d024-a1c5-49f1-8556-e18dc20ba55a"
+
+        Args:
+            sql_command: SQL command that may contain UUID table names
+
+        Returns:
+            SQL command with schema-prefixed UUID table names
+        """
+        # UUID pattern (8-4-4-4-12 format) in double quotes
+        uuid_pattern = r'"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"'
+
+        def replace_with_schema(match):
+            uuid = match.group(1)
+            return f'"t2s"."{uuid}"'
+
+        return re.sub(uuid_pattern, replace_with_schema, sql_command)
 
     def _normalize_params(self, params: Optional[Sequence[Any]]) -> Tuple[Any, ...]:
         """Normalize query parameters."""

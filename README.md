@@ -50,31 +50,42 @@ async def main():
     # Setup
     config = load_config_from_url("postgresql://user:pass@localhost:5432/mydb")
     adapter = create_adapter(config)
-
-    # Get database schema (all tables)
-    schema_str = await adapter.get_schema_str()
-
-    # Or filter specific tables only
-    schema_str = await adapter.get_schema_str(tables=["users", "orders"])
-
-    # Initialize LLM and Text2SQL
     llm = OpenAI(model="gpt-4o-mini", api_key="your-api-key")
-    t2s = Text2SQL(
-        llm=llm,
-        db_structure=schema_str,
-        db_type=adapter.db_type  # Auto-detect from adapter: "postgresql", "mysql", etc.
-    )
 
-    # Generate SQL from natural language
-    sql = await t2s.generate_query("List all users older than 30")
+    # Initialize Text2SQL (schema auto-fetched from adapter)
+    t2s = Text2SQL(llm=llm, adapter=adapter)
+
+    # Generate and execute in one step
+    sql, result = await t2s.query("List all users older than 30")
     print(sql)
-
-    # Execute query
-    result = await adapter.sql_execution(sql)
     if result["success"]:
         print(result["result"])
 
 asyncio.run(main())
+```
+
+#### Custom Schema
+
+```python
+# Filter specific tables
+schema_str = await adapter.get_schema_str(tables=["users", "orders"])
+
+# Or modify schema with additional context
+schema_str = await adapter.get_schema_str()
+schema_str += "\n-- Note: 'status' column uses 1=active, 0=inactive"
+
+# Pass custom schema to Text2SQL
+t2s = Text2SQL(llm=llm, adapter=adapter, db_structure=schema_str)
+```
+
+#### Generate Only (without execution)
+
+```python
+# Generate SQL only
+sql = await t2s.generate_query("List all users older than 30")
+
+# Execute manually
+result = await adapter.sql_execution(sql)
 ```
 
 ### 3. Generate Chart.js Visualization
@@ -164,6 +175,33 @@ from text2query import (
 
 from text2query.llm.chart_generator import ChartGenerator  # Chart.js generator
 from text2query.llm.prompt_builder import PromptBuilder    # Prompt templates
+```
+
+#### Text2SQL Methods
+
+```python
+# Initialize
+t2s = Text2SQL(
+    llm=llm,                      # LlamaIndex LLM instance (required)
+    adapter=adapter,              # Database adapter (required)
+    db_structure=None,            # Custom schema string (optional, auto-fetched if None)
+    chat_history=None,            # Chat history for context (optional)
+)
+
+# Generate and execute query
+sql, result = await t2s.query("How many users per department?")
+
+# Generate SQL only (without execution)
+sql = await t2s.generate_query("How many users per department?")
+
+# Refresh schema from adapter
+await t2s.refresh_schema()
+
+# Update schema manually
+t2s.update_db_structure(new_schema_str)
+
+# Get current config
+config = t2s.get_config()
 ```
 
 ## CLI Usage

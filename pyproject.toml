@@ -1,18 +1,18 @@
 [project]
 name = "text2query"
-version = "0.0.4"
+version = "0.0.4.1"
 description = "A Python library that converts natural language queries to database queries using LLM"
 authors = [
     {name = "_Joe", email = "joelin890120@gmail.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 keywords = ["text2query", "sql", "mongodb", "natural-language", "database", "llm", "text-to-sql"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.10",
     "Topic :: Database",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]

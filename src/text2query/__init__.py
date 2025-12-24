@@ -2,7 +2,7 @@
 text2query: A Python package for converting text to queries
 """
 
-__version__ = "0.0.4"
+__version__ = "0.0.4.1"
 __author__ = "Joe Lin"
 __email__ = "joelin890120@gmail.com"
 
