@@ -361,7 +361,7 @@ class PostgreSQLAdapter(BaseQueryComposer):
             }
 
         if cfg.schema and cfg.schema != "public":
-            pool_kwargs["server_settings"]["search_path"] = cfg.schema
+            pool_kwargs["server_settings"]["search_path"] = f"{cfg.schema}, public"
 
         if getattr(cfg, "ssl_mode", None):
             pool_kwargs["ssl"] = cfg.ssl_mode not in {"disable", "allow"}

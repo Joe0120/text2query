@@ -13,7 +13,7 @@ class WisbiState(TypedDict):
     moves_done: List[available_moves]
     current_move: Optional[available_moves]
 
-    # LLM and EMbedding
+    # LLM and Embedding
     llm_config: ModelConfig
     embedder_config: ModelConfig
 
@@ -51,3 +51,7 @@ class WisbiState(TypedDict):
     result_count: NotRequired[Optional[int]]  # Number of rows returned
     generated_query: NotRequired[Optional[str]]  # Generated SQL/query
     sql: NotRequired[Optional[str]]  # Final SQL query to execute (set by executor_node)
+    
+    # Database schema
+    db_structure: NotRequired[Optional[str]]  # Database schema structure string for SQL generation
+    db_type: NotRequired[Optional[str]]  # Database type (postgresql, mysql, mongodb, etc.)

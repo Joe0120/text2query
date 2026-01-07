@@ -1,4 +1,3 @@
-from curses import meta
 from ..training.store import TrainingStore
 from .state import WisbiState
 
@@ -95,12 +94,10 @@ class TrainerNode:
         else:
             logger.info(f"Total training results: {total_results} (no distance scores to calculate similarity)")
             if total_results > 0:
-                # Set a default score if we have results but no distances
-                state["training_score"] = 0.5
-                logger.info(f"Setting training_score to default 0.5 (results available but no distances)")
+                logger.info(f"Setting training_score to default 0.0 (results available but no distances)")
             else:
-                state["training_score"] = 0.0
                 logger.info(f"Setting training_score to 0.0 (no results)")
+            state["training_score"] = 0.0
         
         state["search_results"] = self.format_response(search_results)
         logger.info(f"Trainer node returning state with training_score: {state.get('training_score')}, search_results length: {len(state.get('search_results', ''))}")
