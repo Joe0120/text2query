@@ -9,6 +9,7 @@ __email__ = "joelin890120@gmail.com"
 from .core.query_composer import QueryComposer, BaseQueryComposer
 from .core.t2s import Text2SQL
 from .exceptions import Text2QueryError, ConversionError
+from .core.utils.model_configs import ModelConfig, create_llm_config
 
 # Legacy import for backward compatibility
 from .core.legacy_core import Text2Query
@@ -20,4 +21,6 @@ __all__ = [
     "Text2Query",  # Legacy
     "Text2QueryError",
     "ConversionError",
+    "ModelConfig",  # LLM configuration
+    "create_llm_config",  # Helper function to create LLM config
 ]
