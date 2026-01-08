@@ -146,10 +146,128 @@ class Text2SQL:
 
         raise Exception(f"Failed to generate query after {max_retries} attempts")
 
-    # Add query method for compatibility with some usage patterns
-    async def query(self, question: str, **kwargs) -> str:
-        """Alias for generate_query"""
-        return await self.generate_query(question, **kwargs)
+    async def query(
+        self,
+        question: str,
+        include_history: bool = True,
+        max_retries: int = 3
+    ) -> tuple:
+        """
+        Generate and execute query in one step with auto-retry on errors
+
+        Args:
+            question: User's natural language question
+            include_history: Whether to include chat history in prompt
+            max_retries: Maximum retry attempts on error (default: 3)
+
+        Returns:
+            Tuple of (generated_query, execution_result)
+
+        Raises:
+            ValueError: If adapter is not configured
+
+        Example:
+            >>> sql, result = await t2s.query("每個部門有幾位員工")
+            >>> print(sql)
+            SELECT department, COUNT(*) FROM employees GROUP BY department
+            >>> print(result)
+            {'success': True, 'result': [{'department': 'IT', 'count': 10}, ...]}
+        """
+        if not self.adapter:
+            raise ValueError("Adapter is required for query() method. Use generate_query() for SQL generation only.")
+
+        last_error = None
+        last_sql = None
+
+        for attempt in range(max_retries):
+            try:
+                # First attempt: normal generation
+                # Retry attempts: include previous error for LLM to fix
+                if attempt == 0:
+                    sql = await self.generate_query(question, include_history=include_history)
+                else:
+                    # Build error context for retry
+                    error_context = self._build_error_context(
+                        question=question,
+                        failed_sql=last_sql,
+                        error_message=str(last_error)
+                    )
+                    sql = await self._generate_with_error_context(error_context)
+
+                last_sql = sql
+
+                # Execute SQL
+                result = await self.adapter.sql_execution(sql)
+
+                # Check if execution was successful
+                if result.get("success", False):
+                    if attempt > 0:
+                        self.logger.info(f"Query succeeded on attempt {attempt + 1}")
+                    return sql, result
+
+                # Execution failed, prepare for retry
+                last_error = result.get("error", "Unknown execution error")
+                self.logger.warning(f"Attempt {attempt + 1}/{max_retries} failed: {last_error}")
+
+            except Exception as e:
+                last_error = e
+                self.logger.warning(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
+
+        # All retries exhausted, return last result
+        self.logger.error(f"All {max_retries} attempts failed. Last error: {last_error}")
+        return last_sql, {"success": False, "error": str(last_error)}
+
+    def _build_error_context(self, question: str, failed_sql: str, error_message: str) -> str:
+        """
+        Build error context prompt for retry attempts
+
+        Args:
+            question: Original user question
+            failed_sql: The SQL that failed
+            error_message: Error message from execution
+
+        Returns:
+            Error context string for LLM
+        """
+        return f"""The previous SQL query failed. Please fix it.
+
+Original question: {question}
+
+Failed SQL:
+{failed_sql}
+
+Error message:
+{error_message}
+
+Please generate a corrected SQL query that fixes this error."""
+
+    async def _generate_with_error_context(self, error_context: str) -> str:
+        """
+        Generate corrected query using error context
+
+        Args:
+            error_context: Error context from _build_error_context
+
+        Returns:
+            Corrected SQL query
+        """
+        prompt = f"""You are a {self.db_type} expert. Fix the SQL query based on the error.
+
+Database structure:
+{self.db_structure}
+
+{error_context}
+
+Return ONLY the corrected SQL query, no explanation."""
+
+        # Use the same generation method as generate_query
+        if self.llm and hasattr(self.llm, 'achat'):
+            response_obj = await self.llm.achat([{"role": "user", "content": prompt}])
+            response = response_obj.message.content
+        else:
+            response = await self._generate_without_streaming(prompt)
+
+        return self._clean_query_response(response)
 
     async def _generate_with_streaming(
         self,
@@ -268,6 +386,23 @@ class Text2SQL:
         """
         self.db_structure = db_structure
         self.logger.info("Database structure updated")
+
+    async def refresh_schema(self) -> str:
+        """
+        Force refresh schema from adapter
+
+        Returns:
+            Updated database structure string
+
+        Raises:
+            ValueError: If adapter is not configured
+        """
+        if not self.adapter:
+            raise ValueError("Adapter is required for refresh_schema() method.")
+
+        self.db_structure = await self.adapter.get_schema_str()
+        self.logger.info("Schema refreshed from adapter")
+        return self.db_structure
 
     def update_chat_history(self, chat_history: Optional[List[Dict[str, str]]]) -> None:
         """
