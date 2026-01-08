@@ -50,25 +50,31 @@ class TrainingStore:
         postgres_config: PostgreSQLConfig,
         training_schema: str = "wisbi",
         embedding_dim: int = 768,
-        embedder: Optional[Any] = None,
+        embedder_config: Optional[Any] = None,
     ):
         """初始化 TrainingStore
-        
+
         注意：建議使用 TrainingStore.initialize() 來建立實例，
         它會自動檢查並建立所需的表。
-        
+
         Args:
             postgres_config: PostgreSQL 連線配置
             training_schema: RAG training 表要存放的 schema 名稱（預設 "wisbi"）
             embedding_dim: Embedding 向量維度（預設 768）
-            embedder: LlamaIndex embedder 實例（可選），用於自動生成 embedding
+            embedder_config: ModelConfig instance for LiteLLM embedding（可選），用於自動生成 embedding
+                            Create via create_llm_config(model_name, apikey, provider)
         """
         self.postgres_config = postgres_config
         self.training_schema = training_schema
         self.embedding_dim = embedding_dim
-        self.embedder = embedder
+        self.embedder_config = embedder_config
         self.logger = logging.getLogger(__name__)
         self._adapter: Optional[PostgreSQLAdapter] = None
+
+        # Import embedding utility if config provided
+        if embedder_config is not None:
+            from ..utils.models import aembed_text
+            self._aembed_text = aembed_text
     
     @classmethod
     async def initialize(
@@ -76,26 +82,31 @@ class TrainingStore:
         postgres_config: PostgreSQLConfig,
         training_schema: str = "wisbi",
         embedding_dim: int = 768,
-        embedder: Optional[Any] = None,
+        embedder_config: Optional[Any] = None,
         auto_init_tables: bool = True,
     ) -> "TrainingStore":
         """初始化 TrainingStore 實例並自動設定表
-        
+
         這是推薦的初始化方式，會自動檢查並建立所需的表（如果不存在）。
-        
+
         Args:
             postgres_config: PostgreSQL 連線配置
             training_schema: RAG training 表要存放的 schema 名稱（預設 "wisbi"）
             embedding_dim: Embedding 向量維度（預設 768）
-            embedder: LlamaIndex embedder 實例（可選），用於自動生成 embedding
+            embedder_config: ModelConfig instance for LiteLLM embedding（可選），用於自動生成 embedding
+                            Create via create_llm_config(model_name, apikey, provider)
             auto_init_tables: 是否自動檢查並建立表（預設 True）
-        
+
         Returns:
             TrainingStore: 已初始化的實例
-        
+
         Example:
-            >>> from llama_index.embeddings.openai import OpenAIEmbedding
-            >>> embedder = OpenAIEmbedding()
+            >>> from text2query.core.utils.model_configs import create_llm_config
+            >>> embedder_config = create_llm_config(
+            ...     model_name="text-embedding-3-small",
+            ...     apikey="your-api-key",
+            ...     provider="openai"
+            ... )
             >>> store = await TrainingStore.initialize(
             ...     postgres_config=PostgreSQLConfig(
             ...         host="localhost",
@@ -105,11 +116,11 @@ class TrainingStore:
             ...         password="pass",
             ...     ),
             ...     training_schema="wisbi",
-            ...     embedding_dim=768,
-            ...     embedder=embedder,
+            ...     embedding_dim=1536,  # Match your embedding model dimension
+            ...     embedder_config=embedder_config,
             ... )
         """
-        store = cls(postgres_config, training_schema, embedding_dim, embedder)
+        store = cls(postgres_config, training_schema, embedding_dim, embedder_config)
         
         if auto_init_tables:
             # 檢查表是否存在
@@ -337,40 +348,28 @@ class TrainingStore:
     
     async def _generate_embedding(self, text: str) -> List[float]:
         """生成文本的 embedding 向量
-        
+
         Args:
             text: 要生成 embedding 的文本
-        
+
         Returns:
             List[float]: embedding 向量
-        
+
         Raises:
-            RuntimeError: 如果沒有提供 embedder
+            RuntimeError: 如果沒有提供 embedder_config
         """
-        if self.embedder is None:
+        if self.embedder_config is None:
             raise RuntimeError(
-                "Embedder not provided. Please initialize TrainingStore with an embedder "
+                "embedder_config not provided. Please initialize TrainingStore with an embedder_config "
                 "or use the manual insert methods (insert_qna, insert_sql_example, insert_documentation) "
                 "with pre-computed embeddings."
             )
-        
+
         try:
-            # LlamaIndex embedder 通常有 get_text_embedding 方法
-            if hasattr(self.embedder, 'get_text_embedding'):
-                embedding = await self.embedder.aget_text_embedding(text)
-            elif hasattr(self.embedder, 'aget_text_embedding'):
-                embedding = await self.embedder.aget_text_embedding(text)
-            else:
-                # 嘗試同步方法
-                if hasattr(self.embedder, 'get_text_embedding'):
-                    embedding = self.embedder.get_text_embedding(text)
-                else:
-                    raise AttributeError(
-                        f"Embedder {type(self.embedder)} does not have get_text_embedding method"
-                    )
-            
+            # Use LiteLLM aembed_text
+            embedding = await self._aembed_text(self.embedder_config, text)
             return embedding
-            
+
         except Exception as e:
             self.logger.exception(f"Error generating embedding: {e}")
             raise
@@ -396,11 +395,11 @@ class TrainingStore:
         title: Optional[str] = None,
     ) -> Optional[int]:
         """統一的訓練資料插入方法，自動生成 embedding
-        
+
         這個方法簡化了訓練資料的插入流程，使用者只需指定 type 和相關欄位，
         系統會自動生成 embedding 並調用對應的底層方法。
-        
-        注意：使用此方法需要在初始化 TrainingStore 時提供 embedder。
+
+        注意：使用此方法需要在初始化 TrainingStore 時提供 embedder_config。
         
         Args:
             type: 資料類型，必須是 "qna", "sql_example", "documentation" 之一
@@ -419,7 +418,7 @@ class TrainingStore:
         
         Raises:
             ValueError: 如果 type 不合法或缺少必要欄位
-            RuntimeError: 如果沒有提供 embedder
+            RuntimeError: 如果沒有提供 embedder_config
         
         Example:
             >>> # 插入問答對

@@ -303,8 +303,15 @@ print(f"Dimension: {len(embedding)}")  # e.g., 1536 for OpenAI, 768 for GCP
 
 ```python
 from text2query.llm.chart_generator import ChartGenerator
+from text2query.core.utils.model_configs import create_llm_config
 
-chart_gen = ChartGenerator(llm=llm)
+llm_config = create_llm_config(
+    model_name="gpt-4o-mini",
+    apikey="your-api-key",
+    provider="openai"
+)
+
+chart_gen = ChartGenerator(llm_config=llm_config)
 chart_config = await chart_gen.generate_chart(
     question="Sales by department",
     sql_command=sql,

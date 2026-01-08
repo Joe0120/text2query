@@ -82,17 +82,21 @@ Important:
 
 class ChartGenerator:
     """
-    Generate Chart.js configurations from query results using LLM.
+    Generate Chart.js configurations from query results using LiteLLM.
 
     This class analyzes query results and generates appropriate Chart.js
     configurations for data visualization.
 
     Example:
-        >>> from llama_index.llms.openai import OpenAI
+        >>> from text2query.core.utils.model_configs import create_llm_config
         >>> from text2query.llm.chart_generator import ChartGenerator
         >>>
-        >>> llm = OpenAI(model="gpt-4", api_key="your-key")
-        >>> generator = ChartGenerator(llm=llm)
+        >>> llm_config = create_llm_config(
+        ...     model_name="gpt-4o-mini",
+        ...     apikey="your-api-key",
+        ...     provider="openai"
+        ... )
+        >>> generator = ChartGenerator(llm_config=llm_config)
         >>>
         >>> result = await generator.generate_chart(
         ...     question="Show monthly sales",
@@ -104,19 +108,27 @@ class ChartGenerator:
 
     def __init__(
         self,
-        llm: Any,
+        llm_config: Any,
         sample_size: int = 5,
     ):
         """
         Initialize ChartGenerator.
 
         Args:
-            llm: LlamaIndex LLM instance (e.g., OpenAI, Anthropic, etc.)
+            llm_config: ModelConfig instance for LiteLLM.
+                       Create via create_llm_config(model_name, apikey, provider)
             sample_size: Number of sample rows to show LLM (default: 5)
         """
-        self.llm = llm
+        if llm_config is None:
+            raise ValueError("llm_config is required. Create via create_llm_config(model_name, apikey, provider)")
+
+        self.llm_config = llm_config
         self.sample_size = sample_size
         self.logger = logging.getLogger("text2query.chart_generator")
+
+        # Import model utilities
+        from ..core.utils.models import agenerate_chat
+        self.agenerate_chat = agenerate_chat
 
     async def generate_chart(
         self,
@@ -163,11 +175,9 @@ class ChartGenerator:
 
             self.logger.info(f"Generating chart for question: {question[:50]}...")
 
-            # Call LLM
-            from llama_index.core.llms import ChatMessage
-            messages = [ChatMessage(role="user", content=prompt)]
-            response = await self.llm.achat(messages)
-            llm_response = str(response.message.content)
+            # Call LLM using LiteLLM
+            messages = [{"role": "user", "content": prompt}]
+            llm_response = await self.agenerate_chat(self.llm_config, messages)
 
             # Parse response
             json_resp = extract_json_from_string(llm_response)

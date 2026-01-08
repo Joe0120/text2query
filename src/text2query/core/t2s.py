@@ -10,44 +10,65 @@ import logging
 
 class Text2SQL:
     """
-    Convert natural language questions to database queries using HTTP request-based LLM calls
+    Convert natural language questions to database queries using LiteLLM.
 
-    This class uses ModelConfig and direct HTTP requests instead of LlamaIndex,
-    making it more flexible and provider-agnostic.
+    This class uses ModelConfig with LiteLLM to support 100+ LLM providers
+    including OpenAI, Azure, Vertex AI, Bedrock, Anthropic, Ollama, and more.
     """
 
     def __init__(
         self,
-        llm_config: Any = None,
+        llm_config: Any,
         db_structure: str = "",
         chat_history: Optional[List[Dict[str, str]]] = None,
         db_type: str = "postgresql",
         adapter: Any = None,
-        llm: Any = None,  # For backward compatibility with some tests
     ):
         """
         Initialize Text2SQL converter
 
+        Uses LiteLLM for LLM calls, supporting 100+ providers including OpenAI, Azure,
+        Vertex AI, Bedrock, Anthropic, Ollama, and more.
+
         Args:
-            llm_config: ModelConfig instance (from core.utils.model_configs)
-            db_structure: Database structure information string
+            llm_config: ModelConfig instance (required).
+                       Create via create_llm_config(model_name, apikey, provider)
+            db_structure: Database structure information string (from adapter.get_schema_str())
             chat_history: Optional list of chat messages
-            db_type: Database type
-            adapter: Database adapter instance for validation
-            llm: Legacy LLM instance (optional)
+                         Format: [{"role": "user", "content": "..."}, ...]
+            db_type: Database type (postgresql, mysql, mongodb, sqlite, sqlserver, oracle)
+            adapter: Database adapter instance. Required for query() and refresh_schema()
+
+        Example:
+            >>> from text2query.core.utils.model_configs import create_llm_config
+            >>> from text2query.core.t2s import Text2SQL
+            >>>
+            >>> llm_config = create_llm_config(
+            ...     model_name="gpt-4o-mini",
+            ...     apikey="your-api-key",
+            ...     provider="openai"  # or "azure", "vertex_ai", "bedrock", etc.
+            ... )
+            >>> t2s = Text2SQL(
+            ...     llm_config=llm_config,
+            ...     adapter=adapter,
+            ...     db_structure=schema_str
+            ... )
+            >>> sql, result = await t2s.query("List all users")
         """
+        if llm_config is None:
+            raise ValueError("llm_config is required. Create via create_llm_config(model_name, apikey, provider)")
+
         self.llm_config = llm_config
         self.db_structure = db_structure
         self.chat_history = chat_history or []
         self.db_type = db_type.lower()
         self.adapter = adapter
-        self.llm = llm or llm_config
         self.logger = logging.getLogger("text2query.t2s")
 
         # Import prompt builder and model utilities
         from ..llm.prompt_builder import PromptBuilder
         from .utils.models import agenerate_chat
-        
+
         self.prompt_builder = PromptBuilder()
         self.agenerate_chat = agenerate_chat
 
@@ -104,14 +125,9 @@ class Text2SQL:
                 )
 
                 self.logger.info(f"Attempt {attempt + 1}/{max_retries} generating query for: {question[:50]}...")
-                
-                # Support legacy llm.achat if provided in some tests, otherwise use request-based agenerate_chat
-                if self.llm and hasattr(self.llm, 'achat'):
-                    # LlamaIndex style
-                    response_obj = await self.llm.achat([{"role": "user", "content": prompt}])
-                    generated_query = response_obj.message.content
-                else:
-                    generated_query = await self._generate_without_streaming(prompt)
+
+                # Generate query using LiteLLM
+                generated_query = await self._generate_without_streaming(prompt)
 
                 # Clean up the response
                 generated_query = self._clean_query_response(generated_query)
@@ -260,12 +276,8 @@ Database structure:
 
 Return ONLY the corrected SQL query, no explanation."""
 
-        # Use the same generation method as generate_query
-        if self.llm and hasattr(self.llm, 'achat'):
-            response_obj = await self.llm.achat([{"role": "user", "content": prompt}])
-            response = response_obj.message.content
-        else:
-            response = await self._generate_without_streaming(prompt)
+        # Generate corrected query using LiteLLM
+        response = await self._generate_without_streaming(prompt)
 
         return self._clean_query_response(response)
 
