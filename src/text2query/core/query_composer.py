@@ -2,9 +2,13 @@
 Query composition functionality
 """
 
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Sequence
 from abc import ABC, abstractmethod
 import asyncio
+import re
+import logging
+from datetime import date, datetime, time
+from decimal import Decimal
 from .connections import BaseConnectionConfig
 
 
@@ -16,6 +20,105 @@ class BaseQueryComposer(ABC):
     def db_type(self) -> str:
         """Return the database type identifier (e.g., 'postgresql', 'mysql', 'mongodb')"""
         pass
+
+    def __init__(self, config: Optional[BaseConnectionConfig] = None):
+        """
+        Initialize query composer with connection configuration
+        
+        Args:
+            config: Database connection configuration
+        """
+        self.config = config
+        if config and not config.validate():
+            raise ValueError("Invalid connection configuration")
+        self.logger = logging.getLogger(f"text2query.adapters.{self.db_type}")
+    
+    def get_connection_info(self) -> Optional[str]:
+        """Get connection string for this composer"""
+        return self.config.to_connection_string() if self.config else None
+    
+    def is_connected(self) -> bool:
+        """Check if composer has valid connection configuration"""
+        return self.config is not None and self.config.validate()
+    
+    async def test_connection(self) -> Tuple[bool, str]:
+        """
+        Test the database connection asynchronously
+        
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        if not self.config:
+            return False, "No connection configuration available"
+        
+        return await self.config.test_connection()
+
+    async def validate_query(self, sql_command: str) -> Tuple[bool, str]:
+        """
+        Validate SQL query syntax and existence of tables/columns if possible.
+        Base implementation returns success. Subclasses should override this.
+        
+        Args:
+            sql_command: The SQL query to validate
+            
+        Returns:
+            Tuple of (is_valid: bool, error_message: str)
+        """
+        return True, ""
+
+    # ============================================================================
+    # Shared Helper Methods
+    # ============================================================================
+
+    def _convert_value(self, value: Any) -> Any:
+        """Convert database values to Python types with enhanced handling"""
+        if value is None:
+            return None
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, (int, float, str, bool)):
+            return value
+        if isinstance(value, (date, time, datetime)):
+            return value.isoformat()
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                return value.decode("utf-8", errors='ignore')
+            except Exception:
+                return value.hex()
+        if isinstance(value, dict):
+            import json
+            return json.dumps(value)
+        return str(value)
+
+    def _contains_chinese(self, text: str) -> bool:
+        """Check if text contains Chinese characters"""
+        # Range of Chinese characters: Unified Ideographs, Extensions A-F
+        chinese_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\U00020000-\U0002a6df\U0002a700-\U0002b73f\U0002b740-\U0002b81f\U0002b820-\U0002ceaf\U0002ceb0-\U0002ebe0]')
+        return bool(re.search(chinese_pattern, text))
+
+    def _convert_chinese_variant(self, text: str) -> Tuple[str, str]:
+        """Convert Chinese variants (Simplified/Traditional)"""
+        try:
+            import opencc
+            # Create OpenCC converters
+            s2t = opencc.OpenCC('s2t')  # Simplified to Traditional
+            t2s = opencc.OpenCC('t2s')  # Traditional to Simplified
+            traditional = s2t.convert(text)
+            simplified = t2s.convert(text)
+            return traditional, simplified
+        except ImportError:
+            # Fallback if opencc is not installed
+            return text, text
+
+    def _normalize_params(self, params: Optional[Sequence[Any]]) -> Tuple[Any, ...]:
+        """Normalize query parameters."""
+        if params is None:
+            return ()
+        if isinstance(params, (list, tuple)):
+            return tuple(params)
+        if isinstance(params, Sequence) and not isinstance(params, (str, bytes, bytearray)):
+            return tuple(params)
+        return (params,)
 
     def __init__(self, config: Optional[BaseConnectionConfig] = None):
         """

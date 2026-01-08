@@ -41,43 +41,265 @@ Supported URL schemes:
 
 ```python
 import asyncio
-from llama_index.llms.openai import OpenAI
-from text2query.core.connections import load_config_from_url
-from text2query.adapters import create_adapter
-from text2query.core.t2s import Text2SQL
+from text2query import load_config_from_url, create_adapter, Text2SQL, create_llm_config
 
 async def main():
-    # Setup
-    config = load_config_from_url("postgresql://user:pass@localhost:5432/mydb")
+    # 1. Setup Database Adapter
+    db_url = "postgresql://user:pass@localhost:5432/mydb"
+    config = load_config_from_url(db_url)
     adapter = create_adapter(config)
-
-    # Get database schema (all tables)
+    
+    # Optional: Get schema for better query generation
     schema_str = await adapter.get_schema_str()
 
-    # Or filter specific tables only
-    schema_str = await adapter.get_schema_str(tables=["users", "orders"])
-
-    # Initialize LLM and Text2SQL
-    llm = OpenAI(model="gpt-4o-mini", api_key="your-api-key")
-    t2s = Text2SQL(
-        llm=llm,
-        db_structure=schema_str,
-        db_type=adapter.db_type  # Auto-detect from adapter: "postgresql", "mysql", etc.
+    # 2. Setup LLM Configuration (using LiteLLM)
+    llm_config = create_llm_config(
+        model_name="gpt-4o-mini",
+        apikey="your-api-key",
+        provider="openai"
     )
 
-    # Generate SQL from natural language
-    sql = await t2s.generate_query("List all users older than 30")
-    print(sql)
+    # 3. Initialize Text2SQL
+    t2s = Text2SQL(
+        llm_config=llm_config,
+        db_structure=schema_str,  # Optional: improves accuracy
+        # db_type="postgresql",   # Optional: defaults to "postgresql"
+        # adapter=adapter,        # Optional: enables query validation
+    )
 
-    # Execute query
+    # 4. Generate SQL from natural language
+    sql = await t2s.generate_query("List all users older than 30")
+    print(f"Generated SQL: {sql}")
+
+    # 5. Execute query
     result = await adapter.sql_execution(sql)
     if result["success"]:
         print(result["result"])
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-### 3. Generate Chart.js Visualization
+### 3. Using WisbiWorkflow (Advanced)
+
+`WisbiWorkflow` provides an advanced LangGraph-based workflow with template matching, training data retrieval, and conversation memory.
+
+```python
+import asyncio
+from text2query.core.nodes.wisbiTree import WisbiWorkflow
+from text2query.core.connections.factory import load_config_from_url
+from text2query.core.utils.model_configs import create_llm_config
+
+async def main():
+    # 1. Database configuration
+    db_config = load_config_from_url("postgresql://user:pass@localhost:5432/mydb")
+    
+    # 2. LLM configuration
+    llm_config = create_llm_config(
+        model_name="gpt-4o-mini",
+        apikey="your-api-key",
+        provider="openai"
+    )
+    
+    # 3. Embedding configuration (for template/training matching)
+    embed_config = create_llm_config(
+        model_name="text-embedding-3-small",
+        apikey="your-api-key",
+        provider="openai"
+    )
+    
+    # 4. Initialize workflow
+    workflow = WisbiWorkflow(
+        db_config=db_config,
+        llm_config=llm_config,
+        embedder_config=embed_config,
+        embedding_dim=1536,  # Must match your embedding model dimension
+    )
+    
+    # 5. Build and run the graph
+    graph = await workflow.build()
+    
+    result = await graph.ainvoke({
+        "query_text": "How many users are there?",
+        "table_id": "public.users",  # Target table
+    })
+    
+    if "generated_query" in result:
+        print(f"Generated SQL: {result['generated_query']}")
+    
+    if "execution_result" in result:
+        print(f"Result: {result['execution_result']}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+> **Note:** WisbiWorkflow requires additional tables in PostgreSQL for templates and training data. These are auto-created on first run.
+
+### 4. Model Provider Configuration (via LiteLLM)
+
+`text2query` uses [LiteLLM](https://github.com/BerriAI/litellm) to support 100+ LLM providers.
+
+#### 🌟 Automatic Environment Detection (Recommended)
+If you have set up standard environment variables (like `OPENAI_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_API_KEY`), you can skip `apikey` and `api_base` parameters:
+
+```python
+# Automatically picks up GOOGLE_APPLICATION_CREDENTIALS from your environment
+llm_config = create_llm_config(
+    model_name="gemini-pro",
+    provider="vertex_ai"
+)
+```
+
+### Environment Variables Reference
+
+Below are the environment variables supported by each provider. Create a `.env` file or export them in your shell:
+
+#### Database
+```bash
+DATABASE_URL=postgresql://user:password@localhost:5432/mydb
+# Or individual components
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=mydb
+POSTGRES_USER=user
+POSTGRES_PASSWD=password
+```
+
+#### OpenAI
+```bash
+OPENAI_API_KEY=sk-...
+OPENAI_API_BASE=https://api.openai.com  # Optional, defaults to OpenAI
+OPENAI_MODEL_NAME=gpt-4o-mini           # Optional
+```
+
+#### Azure OpenAI
+```bash
+# LLM
+AZURE_DEPLOYMENT_NAME=your-gpt-deployment
+AZURE_OPENAI_API_BASE=https://your-resource.openai.azure.com/
+AZURE_OPENAI_API_KEY=your-key
+AZURE_OPENAI_API_VERSION=2024-02-15-preview
+
+# Embedding (can be same or different resource)
+AZURE_EMBEDDING_DEPLOYMENT_NAME=your-embedding-deployment
+AZURE_EMBEDDING_API_BASE=https://your-resource.openai.azure.com/
+AZURE_EMBEDDING_API_KEY=your-key
+```
+
+#### GCP Vertex AI
+```bash
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+GCP_PROJECT_ID=your-project-id
+GCP_REGION=us-central1  # Optional, defaults to us-central1
+```
+
+#### AWS Bedrock
+```bash
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret-key
+AWS_REGION_NAME=us-east-1
+```
+
+#### Detailed Provider Examples
+
+#### Azure OpenAI
+Multiple parameters can be passed via `extra_kwargs`:
+```python
+llm_config = create_llm_config(
+    model_name="your-deployment-name",
+    api_base="https://your-endpoint.openai.azure.com/",
+    apikey="your-azure-api-key",
+    provider="azure",
+    extra_kwargs={
+        "api_version": "2024-02-15-preview"
+    }
+)
+```
+
+#### GCP Vertex AI (Gemini)
+You can also pass credentials directly if not using environment variables:
+```python
+llm_config = create_llm_config(
+    model_name="gemini-pro",
+    provider="vertex_ai",
+    extra_kwargs={
+        "vertex_credentials": "/path/to/key.json"
+    }
+)
+```
+
+#### AWS Bedrock (Claude)
+```python
+llm_config = create_llm_config(
+    model_name="anthropic.claude-v2",
+    provider="bedrock" # Uses AWS_ACCESS_KEY_ID from env by default
+)
+```
+
+#### Ollama (Local)
+```python
+llm_config = create_llm_config(
+    model_name="llama3",
+    api_base="http://localhost:11434",
+    provider="ollama"
+)
+```
+
+### Parameter Mapping Reference
+
+`create_llm_config()` uses simplified parameter names that are mapped to LiteLLM internally:
+
+| `create_llm_config` | LiteLLM Actual | Description |
+|---------------------|----------------|-------------|
+| `model_name` | `model` | Auto-prefixed with provider (e.g., `azure/gpt-4`) |
+| `api_base` | `api_base` | API endpoint URL |
+| `apikey` | `api_key` | API key for authentication |
+| `provider` | — | Used to build model prefix, not passed to LiteLLM |
+| `extra_kwargs` | Spread into kwargs | Provider-specific params (e.g., `api_version`, `vertex_project`) |
+
+### Embedding Configuration
+
+Embeddings also use LiteLLM via `aembed_text()`. Create embedding config the same way as LLM config:
+
+```python
+from text2query.core.utils.models import aembed_text
+from text2query.core.utils.model_configs import create_llm_config
+
+# OpenAI Embedding
+embed_config = create_llm_config(
+    model_name="text-embedding-3-small",
+    apikey="your-api-key",
+    provider="openai"
+)
+
+# Azure Embedding
+embed_config = create_llm_config(
+    model_name="your-embedding-deployment",
+    api_base="https://your-resource.openai.azure.com/",
+    apikey="your-key",
+    provider="azure",
+    extra_kwargs={"api_version": "2024-02-15-preview"}
+)
+
+# GCP Vertex AI Embedding
+embed_config = create_llm_config(
+    model_name="text-embedding-004",
+    provider="vertex_ai",
+    extra_kwargs={
+        "vertex_project": "your-project-id",
+        "vertex_location": "us-central1"
+    }
+)
+
+# Generate embedding
+embedding = await aembed_text(embed_config, "Your text here")
+print(f"Dimension: {len(embedding)}")  # e.g., 1536 for OpenAI, 768 for GCP
+```
+
+> **⚠️ Note:** Different providers produce different embedding dimensions (e.g., OpenAI: 1536, GCP: 768). Ensure your vector database column matches the embedding dimension of your chosen provider.
+
+### 4. Generate Chart.js Visualization
 
 ```python
 from text2query.llm.chart_generator import ChartGenerator

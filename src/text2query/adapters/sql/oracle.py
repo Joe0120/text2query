@@ -109,6 +109,38 @@ class OracleAdapter(BaseQueryComposer):
             "metadata": execution["metadata"],
         }
 
+    async def validate_query(self, sql_command: str) -> Tuple[bool, str]:
+        """Validate Oracle query by EXPLAINing it."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+
+        try:
+            await loop.run_in_executor(
+                None,
+                self._validate_sql_sync,
+                sql_command,
+            )
+            return True, ""
+        except Exception as e:
+            return False, str(e)
+
+    def _validate_sql_sync(self, sql_command: str) -> None:
+        """Execute EXPLAIN synchronously in executor for validation."""
+        import oracledb
+        cfg = self.config
+        dsn = cfg.get_dsn()
+        user = cfg.username if cfg.database_name.upper() in ['SYSTEM', 'SYS', 'XE'] else cfg.database_name
+        connection = oracledb.connect(user=user, password=cfg.password, dsn=dsn)
+        cursor = connection.cursor()
+        try:
+            # Oracle uses EXPLAIN PLAN FOR ...
+            cursor.execute(f"EXPLAIN PLAN FOR {sql_command}")
+        finally:
+            cursor.close()
+            connection.close()
+
     async def _get_schema_info(self, tables: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
         """
         獲取資料庫 schema 信息（核心方法）
@@ -449,16 +481,8 @@ class OracleAdapter(BaseQueryComposer):
         return sql_with_limit
 
     def _normalize_params(self, params: Optional[Sequence[Any]]) -> Tuple[Any, ...]:
-        """Normalize query parameters."""
-        if params is None:
-            return ()
-        if isinstance(params, (list, tuple)):
-            return tuple(params)
-        if isinstance(params, Sequence) and not isinstance(params, (str, bytes, bytearray)):
-            return tuple(params)
-        if isinstance(params, dict):
-            raise TypeError("OracleAdapter sql_execution only supports positional parameters")
-        return (params,)
+        """Normalize query parameters. Overrides base class to ensure tuple return."""
+        return super()._normalize_params(params)
 
     def _extract_command(self, sql_upper: str) -> str:
         """Extract the command keyword from SQL."""
@@ -513,51 +537,8 @@ class OracleAdapter(BaseQueryComposer):
             return [self._convert_value(value) for value in row.values()]
         return [self._convert_value(value) for value in row]
 
-    def _convert_value(self, value: Any) -> Any:
-        """Convert database values to Python types with enhanced handling"""
-        if value is None:
-            return None
-        if isinstance(value, Decimal):
-            return float(value)
-        if isinstance(value, (int, float, str, bool)):
-            return value
-        if isinstance(value, (date, time, datetime)):
-            return value.isoformat()
-        if isinstance(value, (bytes, bytearray)):
-            try:
-                return value.decode("utf-8", errors="ignore")
-            except Exception:  # pragma: no cover
-                return value.hex()
-        if isinstance(value, dict):
-            import json
-            return json.dumps(value)
-        return str(value)
-
-    # ============================================================================
-    # 5. 中文處理輔助方法
-    # ============================================================================
-
-    def _contains_chinese(self, text: str) -> bool:
-        """檢查文字是否包含中文字符"""
-        chinese_pattern = re.compile(
-            r"[\u4e00-\u9fff\u3400-\u4dbf\U00020000-\U0002a6df"
-            r"\U0002a700-\U0002b73f\U0002b740-\U0002b81f"
-            r"\U0002b820-\U0002ceaf\U0002ceb0-\U0002ebe0]"
-        )
-        return bool(re.search(chinese_pattern, text))
-
-    def _convert_chinese_variant(self, text: str) -> tuple:
-        """轉換中文變體（簡體/繁體）"""
-        try:
-            import opencc
-            simplified_to_traditional = opencc.OpenCC("s2t")
-            traditional_to_simplified = opencc.OpenCC("t2s")
-            traditional = simplified_to_traditional.convert(text)
-            simplified = traditional_to_simplified.convert(text)
-            return traditional, simplified
-        except ImportError:
-            self.logger.warning("opencc not installed, using simplified Chinese variant conversion")
-            return text, text
+    # Methods _convert_value, _contains_chinese, _convert_chinese_variant 
+    # are now inherited from BaseQueryComposer.
 
     # ============================================================================
     # 6. Oracle 特定的同步執行方法

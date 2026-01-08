@@ -1,79 +1,77 @@
 from .model_configs import ModelConfig
-import requests
+import litellm
 from typing import List, Optional, Dict, Any
 import asyncio
 
-def build_url(config: ModelConfig) -> str:
-    return f"{config.base_url.rstrip('/')}/{config.endpoint.lstrip('/')}"
+# Configure litellm to be quiet if needed
+# litellm.suppress_debug_info = True
 
-def build_header(config: ModelConfig) -> Dict[str, str]:
-    header: Dict[str, str] = {
-        "Content-Type": "application/json",
-    }
-    # Groq and OpenAI both use Bearer token authentication
-    if config.provider in ("openai", "groq"):
-        header["Authorization"] = f"Bearer {config.api_key}"
-    return header
-
-def parse_response(config: ModelConfig, data: Dict[str, Any]) -> str:
-    # Groq uses OpenAI-compatible response format
-    if config.provider in ("openai", "groq"):
-        try:
-            return data["choices"][0]["message"]["content"]
-        except Exception as e:
-            raise RuntimeError(f"Unexpected {config.provider} chat response format: {data}") from e
-
-    if config.provider == "ollama":
-        try:
-            return data["message"]["content"]
-        except Exception as e:
-            raise RuntimeError(f"Unexpected Ollama chat response format: {data}") from e
-
-    raise ValueError(f"Unsupported provider in parse_response: {config.provider}")
-
-def generate_chat(config: ModelConfig, messages: List[Dict[str, Any]]) -> str:
+def build_model_name(config: ModelConfig) -> str:
     """
-    Generate a chat response from a model
+    Build the model name string for litellm.
+    Example: "azure/gpt-4", "vertex_ai/gemini-pro", etc.
     """
-    url = build_url(config)
-    header = build_header(config)
-    payload = {
-        "model": config.model_name,
-        "messages": messages,
-    }
-    if config.max_tokens:
-        payload["max_tokens"] = config.max_tokens
-    if config.temperature:
-        payload["temperature"] = config.temperature
-
-    response = requests.post(url, headers=header, timeout=config.timeout, json=payload)
-    response.raise_for_status()
-    data = response.json()
-
-    return parse_response(config, data)
+    if config.provider == "openai":
+        return config.model_name
+    return f"{config.provider}/{config.model_name}"
 
 async def agenerate_chat(config: ModelConfig, messages: List[Dict[str, str]]) -> str:
-    return await asyncio.to_thread(generate_chat, config, messages)
-
-def parse_embedding(config: ModelConfig, data: Dict[str, Any]) -> List[float]:
-    # Groq uses OpenAI-compatible embedding response format
-    if config.provider in ("openai", "groq"):
-        return data["data"][0]["embedding"]
-    elif config.provider == "ollama":
-        return data["embeddings"][0]
-    raise ValueError(f"Unsupported provider in parse_embedding: {config.provider}")
-
-def embed_text(config: ModelConfig, text: str) -> List[float]:
-    url = build_url(config)
-    header = build_header(config)
-    payload = {
-        "model": config.model_name,
-        "input": [text],
+    """
+    Generate a chat response from a model using litellm.
+    """
+    model = build_model_name(config)
+    
+    # Common arguments for litellm.completion
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "timeout": config.timeout,
+        "temperature": config.temperature,
     }
-    response = requests.post(url, headers=header, timeout=config.timeout, json=payload)
-    response.raise_for_status()
-    data = response.json()
-    return parse_embedding(config, data)
+    
+    # Only pass api_base/key if provided, allowing litellm to fallback to env vars
+    if config.base_url:
+        kwargs["api_base"] = config.base_url
+    if config.api_key:
+        kwargs["api_key"] = config.api_key
+        
+    # Add optional max_tokens if set
+    if config.max_tokens:
+        kwargs["max_tokens"] = config.max_tokens
+
+    # Apply extra provider-specific kwargs
+    if config.extra_kwargs:
+        kwargs.update(config.extra_kwargs)
+
+    try:
+        response = await litellm.acompletion(**kwargs)
+        return response.choices[0].message.content
+    except Exception as e:
+        raise RuntimeError(f"LiteLLM completion failed for {model}: {str(e)}") from e
 
 async def aembed_text(config: ModelConfig, text: str) -> List[float]:
-    return await asyncio.to_thread(embed_text, config, text)
+    """
+    Generate text embeddings using litellm.
+    """
+    model = build_model_name(config)
+    
+    # Common arguments
+    kwargs = {
+        "model": model,
+        "input": [text],
+        "timeout": config.timeout
+    }
+    
+    if config.base_url:
+        kwargs["api_base"] = config.base_url
+    if config.api_key:
+        kwargs["api_key"] = config.api_key
+        
+    if config.extra_kwargs:
+        kwargs.update(config.extra_kwargs)
+        
+    try:
+        response = await litellm.aembedding(**kwargs)
+        return response.data[0]["embedding"]
+    except Exception as e:
+        raise RuntimeError(f"LiteLLM embedding failed for {model}: {str(e)}") from e

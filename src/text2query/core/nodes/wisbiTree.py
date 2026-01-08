@@ -159,6 +159,7 @@ class WisbiWorkflow:
         llm_max_tokens: Optional[int] = None,
         llm_temperature: Optional[float] = 0.2,
         llm_timeout: int = 30,
+        llm_extra_kwargs: Optional[Dict[str, Any]] = None,
         # Individual embedder parameters (used if embedder_config is not provided)
         embed_model_name: Optional[str] = None,
         embed_api_base: Optional[str] = None,
@@ -168,6 +169,7 @@ class WisbiWorkflow:
         embed_max_tokens: Optional[int] = None,
         embed_temperature: Optional[float] = 0.2,
         embed_timeout: int = 30,
+        embed_extra_kwargs: Optional[Dict[str, Any]] = None,
         # Workflow configuration
         template_schema: str = "wisbi",
         training_schema: str = "wisbi",
@@ -232,56 +234,52 @@ class WisbiWorkflow:
             )
         self.db_config = db_config
         
-        # Validate and create llm_config
-        # llm_config takes precedence if both are provided
         if llm_config is not None:
             self.llm_config = llm_config
-        elif llm_name and llm_api_base and llm_api_key is not None:
-            # Parameter-based initialization - validate non-empty strings
+        elif llm_name:
             if not llm_name.strip():
-                raise ValueError("llm_name cannot be empty")
-            if not llm_api_base.strip():
-                raise ValueError("llm_api_base cannot be empty")
-            # llm_api_key can be empty string (e.g., for Ollama)
+                raise ValueError("llm_name cannot be empty or only whitespace")
+            # Parameter-based initialization
             self.llm_config = create_model_config(
                 model_name=llm_name,
-                api_base=llm_api_base,
-                apikey=llm_api_key,
+                api_base=llm_api_base or "",
+                apikey=llm_api_key or "",
                 endpoint=llm_endpoint,
                 provider=llm_provider,
                 max_tokens=llm_max_tokens,
                 temperature=llm_temperature,
                 timeout=llm_timeout,
+                extra_kwargs=llm_extra_kwargs,
             )
         else:
             raise ValueError(
-                "Either llm_config or all of (llm_name, llm_api_base, llm_api_key) must be provided."
+                "Either llm_config must be provided, or at least llm_name must be provided "
+                "(with other parameters optionally supplied via environment variables)."
             )
         
         # Validate and create embedder_config
         # embedder_config takes precedence if both are provided
         if embedder_config is not None:
             self.embedder_config = embedder_config
-        elif embed_model_name and embed_api_base and embed_api_key is not None:
-            # Parameter-based initialization - validate non-empty strings
+        elif embed_model_name:
             if not embed_model_name.strip():
-                raise ValueError("embed_model_name cannot be empty")
-            if not embed_api_base.strip():
-                raise ValueError("embed_api_base cannot be empty")
-            # embed_api_key can be empty string (e.g., for Ollama)
+                raise ValueError("embed_model_name cannot be empty or only whitespace")
+            # Parameter-based initialization
             self.embedder_config = create_model_config(
                 model_name=embed_model_name,
-                api_base=embed_api_base,
-                apikey=embed_api_key,
+                api_base=embed_api_base or "",
+                apikey=embed_api_key or "",
                 endpoint=embed_endpoint,
                 provider=embed_provider,
                 max_tokens=embed_max_tokens,
                 temperature=embed_temperature,
                 timeout=embed_timeout,
+                extra_kwargs=embed_extra_kwargs,
             )
         else:
             raise ValueError(
-                "Either embedder_config or all of (embed_model_name, embed_api_base, embed_api_key) must be provided."
+                "Either embedder_config must be provided, or at least embed_model_name must be provided "
+                "(with other parameters optionally supplied via environment variables)."
             )
         self.template_schema = template_schema
         self.training_schema = training_schema
@@ -345,7 +343,15 @@ class WisbiWorkflow:
                 raise
         
         async def memory_retrieve_wrapper(state: WisbiState) -> WisbiState:
-            """Memory node wrapper - stub that passes through state"""
+            """Memory node wrapper - Injects configs and initializes state"""
+            if "llm_config" not in state:
+                state["llm_config"] = self.llm_config
+            if "embedder_config" not in state:
+                state["embedder_config"] = self.embedder_config
+            if "db_config" not in state:
+                state["db_config"] = self.db_config
+            if "moves_done" not in state:
+                state["moves_done"] = []
             return state
         
         async def memory_save_wrapper(state: WisbiState) -> WisbiState:

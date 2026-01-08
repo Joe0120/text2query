@@ -162,7 +162,8 @@ class ExecutorNode:
             logger.info(f"Training score {training_score:.4f} < 0.5, not using training context")
             return None
         
-        logger.info(f"Using training context (score: {training_score:.4f if training_score else 'N/A'})")
+        score_str = f"{training_score:.4f}" if training_score is not None else "N/A"
+        logger.info(f"Using training context (score: {score_str})")
         return search_results
     
     def _get_template_context(self, state: WisbiState) -> Optional[str]:
@@ -193,10 +194,12 @@ class ExecutorNode:
                 context_parts.append(f"Template Description: {template_desc}")
         
         # Add template SQL as reference
-        context_parts.append(f"Reference SQL (similarity: {template_score:.4f if template_score else 'N/A'}):")
+        score_str = f"{template_score:.4f}" if template_score is not None else "N/A"
+        context_parts.append(f"Reference SQL (similarity: {score_str}):")
         context_parts.append(template_sql)
         
-        logger.info(f"Using template context as hint (score: {template_score:.4f if template_score else 'N/A'})")
+        score_str = f"{template_score:.4f}" if template_score is not None else "N/A"
+        logger.info(f"Using template context as hint (score: {score_str})")
         return "\n".join(context_parts)
     
     def _clean_sql_response(self, response: str) -> str:

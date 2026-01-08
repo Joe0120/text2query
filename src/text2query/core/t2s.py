@@ -4,6 +4,7 @@ Text-to-SQL/Query converter using HTTP request-based LLM calls
 
 from typing import Optional, Any, List, Dict
 import re
+import asyncio
 import logging
 
 
@@ -17,10 +18,12 @@ class Text2SQL:
 
     def __init__(
         self,
-        llm_config: Any,
-        db_structure: str,
+        llm_config: Any = None,
+        db_structure: str = "",
         chat_history: Optional[List[Dict[str, str]]] = None,
-        db_type: str = "postgresql"
+        db_type: str = "postgresql",
+        adapter: Any = None,
+        llm: Any = None,  # For backward compatibility with some tests
     ):
         """
         Initialize Text2SQL converter
@@ -28,30 +31,17 @@ class Text2SQL:
         Args:
             llm_config: ModelConfig instance (from core.utils.model_configs)
             db_structure: Database structure information string
-                         (from adapter.get_schema_str())
-            chat_history: Optional list of chat messages in format
-                         [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
-            db_type: Database type (postgresql, mysql, mongodb, sqlite, sqlserver, oracle)
-
-        Example:
-            >>> from text2query.core.utils.model_configs import ModelConfig
-            >>> from text2query.core.t2s import Text2SQL
-            >>>
-            >>> llm_config = ModelConfig(
-            ...     base_url="http://localhost:11434",
-            ...     endpoint="/api/chat",
-            ...     api_key="",
-            ...     model_name="gemma3:1b",
-            ...     provider="ollama"
-            ... )
-            >>> db_structure = await adapter.get_schema_str()
-            >>> t2s = Text2SQL(llm_config=llm_config, db_structure=db_structure, db_type="mongodb")
-            >>> query = await t2s.generate_query("每個部門有多少經理？")
+            chat_history: Optional list of chat messages
+            db_type: Database type
+            adapter: Database adapter instance for validation
+            llm: Legacy LLM instance (optional)
         """
         self.llm_config = llm_config
         self.db_structure = db_structure
         self.chat_history = chat_history or []
         self.db_type = db_type.lower()
+        self.adapter = adapter
+        self.llm = llm or llm_config
         self.logger = logging.getLogger("text2query.t2s")
 
         # Import prompt builder and model utilities
@@ -69,64 +59,97 @@ class Text2SQL:
         show_thinking: bool = False,
         training_context: Optional[str] = None,
         additional_context: Optional[str] = None,
+        validate: bool = False,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
     ) -> str:
         """
-        Generate database query from natural language question
+        Generate database query from natural language question with retry logic
 
         Args:
             question: User's natural language question
             include_history: Whether to include chat history in prompt
-            stream_thinking: Whether to stream the LLM thinking process (deprecated, always False)
-            show_thinking: Whether to print the thinking process (deprecated, always False)
+            stream_thinking: (deprecated, always False)
+            show_thinking: (deprecated, always False)
             training_context: Context from SQL Training Data
             additional_context: Additional context from additional data
+            validate: Whether to validate the generated query via adapter
+            max_retries: Maximum number of retries if generation or validation fails
+            retry_delay: Delay between retries in seconds
 
         Returns:
             Generated database query string
 
         Raises:
-            Exception: If query generation fails
-
-        Example:
-            >>> query = await t2s.generate_query("查詢所有用戶")
-            >>> print(query)
-            SELECT * FROM users
+            Exception: If query generation fails after all retries
         """
-        try:
-            # Build prompt
-            chat_history_text = None
-            if include_history and self.chat_history:
-                chat_history_text = self._format_chat_history()
+        last_error = ""
+        chat_history_text = self._format_chat_history() if include_history else None
 
-            prompt = self.prompt_builder.build_prompt(
-                question=question,
-                db_structure=self.db_structure,
-                db_type=self.db_type,
-                chat_history=chat_history_text,
-                training_context=training_context,
-                additional_context=additional_context,
-            )
+        for attempt in range(max_retries):
+            try:
+                # Add error feedback to prompt if this is a retry
+                current_training_context = training_context
+                if attempt > 0 and last_error:
+                    feedback = f"\n\n[Previous Attempts Failed]\nError: {last_error}\nPlease fix the SQL query according to this error."
+                    current_training_context = (current_training_context or "") + feedback
 
-            self.logger.info(f"Generating query for question: {question[:50]}..., with Prompt: {prompt[:100]}...")
+                prompt = self.prompt_builder.build_prompt(
+                    question=question,
+                    db_structure=self.db_structure,
+                    db_type=self.db_type,
+                    chat_history=chat_history_text,
+                    training_context=current_training_context,
+                    additional_context=additional_context,
+                )
 
-            # Generate query using request-based approach
-            generated_query = await self._generate_without_streaming(prompt)
+                self.logger.info(f"Attempt {attempt + 1}/{max_retries} generating query for: {question[:50]}...")
+                
+                # Support legacy llm.achat if provided in some tests, otherwise use request-based agenerate_chat
+                if self.llm and hasattr(self.llm, 'achat'):
+                    # LlamaIndex style
+                    response_obj = await self.llm.achat([{"role": "user", "content": prompt}])
+                    generated_query = response_obj.message.content
+                else:
+                    generated_query = await self._generate_without_streaming(prompt)
 
-            # Clean up the response
-            generated_query = self._clean_query_response(generated_query)
+                # Clean up the response
+                generated_query = self._clean_query_response(generated_query)
+                self.logger.info(f"Generated query: {generated_query}")
 
-            self.logger.info(f"Generated query: {generated_query}...")
+                # Optional validation
+                if validate and self.adapter:
+                    is_valid, error_msg = await self.adapter.validate_query(generated_query)
+                    if not is_valid:
+                        self.logger.warning(f"Validation failed for query: {error_msg}")
+                        last_error = error_msg
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(retry_delay)
+                            continue
+                        else:
+                            raise Exception(f"Validation failed: {error_msg}")
 
-            # Update chat history with this interaction
-            if include_history:
-                self.chat_history.append({"role": "user", "content": question})
-                self.chat_history.append({"role": "assistant", "content": generated_query})
+                # Update chat history with this interaction
+                if include_history:
+                    self.chat_history.append({"role": "user", "content": question})
+                    self.chat_history.append({"role": "assistant", "content": generated_query})
 
-            return generated_query
+                return generated_query
 
-        except Exception as e:
-            self.logger.error(f"Query generation failed: {e}")
-            raise Exception(f"Failed to generate query: {str(e)}") from e
+            except Exception as e:
+                last_error = str(e)
+                self.logger.error(f"Attempt {attempt + 1} failed: {last_error}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                else:
+                    raise Exception(f"Failed to generate query after {max_retries} attempts: {last_error}") from e
+
+        raise Exception(f"Failed to generate query after {max_retries} attempts")
+
+    # Add query method for compatibility with some usage patterns
+    async def query(self, question: str, **kwargs) -> str:
+        """Alias for generate_query"""
+        return await self.generate_query(question, **kwargs)
 
     async def _generate_with_streaming(
         self,

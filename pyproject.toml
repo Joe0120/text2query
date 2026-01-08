@@ -21,6 +21,7 @@ dependencies = [
     "asyncpg>=0.30.0",
     "llama-index-core>=0.10.0",
     "opencc-python-reimplemented",
+    "litellm>=1.0.0",
 ]
 
 [project.optional-dependencies]
